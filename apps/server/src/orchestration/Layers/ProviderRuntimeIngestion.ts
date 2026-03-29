@@ -32,6 +32,12 @@ const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${t
 const providerCommandId = (event: ProviderRuntimeEvent, tag: string): CommandId =>
   CommandId.makeUnsafe(`provider:${event.eventId}:${tag}:${crypto.randomUUID()}`);
 
+interface AssistantSegmentState {
+  baseKey: string;
+  nextSegmentIndex: number;
+  activeMessageId: MessageId | null;
+}
+
 const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
 const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
@@ -83,6 +89,10 @@ function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string
   return trimmed;
 }
 
+function hasRenderableAssistantText(text: string | undefined): boolean {
+  return (text?.trim().length ?? 0) > 0;
+}
+
 function proposedPlanIdForTurn(threadId: ThreadId, turnId: TurnId): string {
   return `plan:${threadId}:turn:${turnId}`;
 }
@@ -96,6 +106,16 @@ function proposedPlanIdFromEvent(event: ProviderRuntimeEvent, threadId: ThreadId
     return `plan:${threadId}:item:${event.itemId}`;
   }
   return `plan:${threadId}:event:${event.eventId}`;
+}
+
+function assistantSegmentBaseKeyFromEvent(event: ProviderRuntimeEvent): string {
+  return String(event.itemId ?? event.turnId ?? event.eventId);
+}
+
+function assistantSegmentMessageId(baseKey: string, segmentIndex: number): MessageId {
+  return MessageId.makeUnsafe(
+    segmentIndex === 0 ? `assistant:${baseKey}` : `assistant:${baseKey}:segment:${segmentIndex}`,
+  );
 }
 
 function asString(value: unknown): string | undefined {
@@ -552,6 +572,15 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(""),
   });
 
+  const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantSegmentState>({
+    capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
+    timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
+    lookup: () =>
+      Effect.die(
+        new Error("assistant segment state should be read through getOption before initialization"),
+      ),
+  });
+
   const bufferedProposedPlanById = yield* Cache.make<string, { text: string; createdAt: string }>({
     capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
     timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
@@ -619,6 +648,82 @@ const make = Effect.gen(function* () {
   const clearAssistantMessageIdsForTurn = (threadId: ThreadId, turnId: TurnId) =>
     Cache.invalidate(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId));
 
+  const getAssistantSegmentStateForTurn = (threadId: ThreadId, turnId: TurnId) =>
+    Cache.getOption(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId));
+
+  const setAssistantSegmentStateForTurn = (
+    threadId: ThreadId,
+    turnId: TurnId,
+    state: AssistantSegmentState,
+  ) => Cache.set(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId), state);
+
+  const clearAssistantSegmentStateForTurn = (threadId: ThreadId, turnId: TurnId) =>
+    Cache.invalidate(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId));
+
+  const getActiveAssistantMessageIdForTurn = (threadId: ThreadId, turnId: TurnId) =>
+    getAssistantSegmentStateForTurn(threadId, turnId).pipe(
+      Effect.map((state) =>
+        Option.flatMap(state, (entry) =>
+          entry.activeMessageId ? Option.some(entry.activeMessageId) : Option.none(),
+        ),
+      ),
+    );
+
+  const startAssistantSegmentForTurn = (input: {
+    threadId: ThreadId;
+    turnId: TurnId;
+    baseKey: string;
+  }) =>
+    getAssistantSegmentStateForTurn(input.threadId, input.turnId).pipe(
+      Effect.flatMap((existingState) =>
+        Effect.gen(function* () {
+          const nextState = Option.match(existingState, {
+            onNone: () => ({
+              baseKey: input.baseKey,
+              nextSegmentIndex: 1,
+              activeMessageId: assistantSegmentMessageId(input.baseKey, 0),
+            }),
+            onSome: (state) => {
+              const segmentIndex = state.baseKey === input.baseKey ? state.nextSegmentIndex : 0;
+              const messageId = assistantSegmentMessageId(input.baseKey, segmentIndex);
+              return {
+                baseKey: input.baseKey,
+                nextSegmentIndex: state.baseKey === input.baseKey ? state.nextSegmentIndex + 1 : 1,
+                activeMessageId: messageId,
+              } satisfies AssistantSegmentState;
+            },
+          });
+          yield* setAssistantSegmentStateForTurn(input.threadId, input.turnId, nextState);
+          return nextState.activeMessageId!;
+        }),
+      ),
+    );
+
+  const getOrCreateAssistantMessageId = (input: {
+    threadId: ThreadId;
+    event: ProviderRuntimeEvent;
+    turnId?: TurnId;
+  }) =>
+    Effect.gen(function* () {
+      if (!input.turnId) {
+        return assistantSegmentMessageId(assistantSegmentBaseKeyFromEvent(input.event), 0);
+      }
+
+      const activeMessageId = yield* getActiveAssistantMessageIdForTurn(
+        input.threadId,
+        input.turnId,
+      );
+      if (Option.isSome(activeMessageId)) {
+        return activeMessageId.value;
+      }
+
+      return yield* startAssistantSegmentForTurn({
+        threadId: input.threadId,
+        turnId: input.turnId,
+        baseKey: assistantSegmentBaseKeyFromEvent(input.event),
+      });
+    });
+
   const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
       Effect.flatMap((existingText) =>
@@ -678,6 +783,65 @@ const make = Effect.gen(function* () {
   const clearAssistantMessageState = (messageId: MessageId) =>
     clearBufferedAssistantText(messageId);
 
+  const flushBufferedAssistantMessage = (input: {
+    event: ProviderRuntimeEvent;
+    threadId: ThreadId;
+    messageId: MessageId;
+    turnId?: TurnId;
+    createdAt: string;
+    commandTag: string;
+  }) =>
+    Effect.gen(function* () {
+      const bufferedText = yield* takeBufferedAssistantText(input.messageId);
+      if (!hasRenderableAssistantText(bufferedText)) {
+        return false;
+      }
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: providerCommandId(input.event, input.commandTag),
+        threadId: input.threadId,
+        messageId: input.messageId,
+        delta: bufferedText,
+        ...(input.turnId ? { turnId: input.turnId } : {}),
+        createdAt: input.createdAt,
+      });
+      return true;
+    });
+
+  const flushBufferedAssistantMessagesForTurn = (input: {
+    event: ProviderRuntimeEvent;
+    threadId: ThreadId;
+    turnId: TurnId;
+    createdAt: string;
+    commandTag: string;
+  }) =>
+    Effect.gen(function* () {
+      const assistantMessageIds = yield* getAssistantMessageIdsForTurn(
+        input.threadId,
+        input.turnId,
+      );
+      const flushedMessageIds = new Set<MessageId>();
+      yield* Effect.forEach(
+        assistantMessageIds,
+        (messageId) =>
+          flushBufferedAssistantMessage({
+            event: input.event,
+            threadId: input.threadId,
+            messageId,
+            turnId: input.turnId,
+            createdAt: input.createdAt,
+            commandTag: input.commandTag,
+          }).pipe(
+            Effect.tap((flushed) =>
+              flushed ? Effect.sync(() => flushedMessageIds.add(messageId)) : Effect.void,
+            ),
+          ),
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      return flushedMessageIds;
+    });
+
   const finalizeAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
@@ -687,6 +851,7 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
@@ -696,8 +861,9 @@ const make = Effect.gen(function* () {
           : (input.fallbackText?.trim().length ?? 0) > 0
             ? input.fallbackText!
             : "";
+      const hasRenderableText = hasRenderableAssistantText(text);
 
-      if (text.length > 0) {
+      if (hasRenderableText) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.delta",
           commandId: providerCommandId(input.event, input.finalDeltaCommandTag),
@@ -709,15 +875,59 @@ const make = Effect.gen(function* () {
         });
       }
 
-      yield* orchestrationEngine.dispatch({
-        type: "thread.message.assistant.complete",
-        commandId: providerCommandId(input.event, input.commandTag),
-        threadId: input.threadId,
-        messageId: input.messageId,
-        ...(input.turnId ? { turnId: input.turnId } : {}),
-        createdAt: input.createdAt,
-      });
+      if (input.hasProjectedMessage || hasRenderableText) {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: providerCommandId(input.event, input.commandTag),
+          threadId: input.threadId,
+          messageId: input.messageId,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+          createdAt: input.createdAt,
+        });
+      }
       yield* clearAssistantMessageState(input.messageId);
+    });
+
+  const finalizeActiveAssistantSegmentForTurn = (input: {
+    event: ProviderRuntimeEvent;
+    threadId: ThreadId;
+    turnId: TurnId;
+    createdAt: string;
+    commandTag: string;
+    finalDeltaCommandTag: string;
+    hasProjectedMessage: boolean;
+    flushedMessageIds?: ReadonlySet<MessageId>;
+  }) =>
+    Effect.gen(function* () {
+      const activeMessageId = yield* getActiveAssistantMessageIdForTurn(
+        input.threadId,
+        input.turnId,
+      );
+      if (Option.isNone(activeMessageId)) {
+        return;
+      }
+
+      yield* finalizeAssistantMessage({
+        event: input.event,
+        threadId: input.threadId,
+        messageId: activeMessageId.value,
+        turnId: input.turnId,
+        createdAt: input.createdAt,
+        commandTag: input.commandTag,
+        finalDeltaCommandTag: input.finalDeltaCommandTag,
+        hasProjectedMessage:
+          input.hasProjectedMessage ||
+          (input.flushedMessageIds?.has(activeMessageId.value) ?? false),
+      });
+      yield* forgetAssistantMessageId(input.threadId, input.turnId, activeMessageId.value);
+
+      const state = yield* getAssistantSegmentStateForTurn(input.threadId, input.turnId);
+      if (Option.isSome(state)) {
+        yield* setAssistantSegmentStateForTurn(input.threadId, input.turnId, {
+          ...state.value,
+          activeMessageId: null,
+        });
+      }
     });
 
   const upsertProposedPlan = (input: {
@@ -803,6 +1013,7 @@ const make = Effect.gen(function* () {
       const prefix = `${threadId}:`;
       const proposedPlanPrefix = `plan:${threadId}:`;
       const turnKeys = Array.from(yield* Cache.keys(turnMessageIdsByTurnKey));
+      const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
       const proposedPlanKeys = Array.from(yield* Cache.keys(bufferedProposedPlanById));
       yield* Effect.forEach(
         turnKeys,
@@ -821,6 +1032,14 @@ const make = Effect.gen(function* () {
 
             yield* Cache.invalidate(turnMessageIdsByTurnKey, key);
           }),
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        assistantSegmentKeys,
+        (key) =>
+          key.startsWith(prefix)
+            ? Cache.invalidate(assistantSegmentStateByTurnKey, key)
+            : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
       yield* Effect.forEach(
@@ -1038,10 +1257,12 @@ const make = Effect.gen(function* () {
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
 
       if (assistantDelta && assistantDelta.length > 0) {
-        const assistantMessageId = MessageId.makeUnsafe(
-          `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
-        );
         const turnId = toTurnId(event.turnId);
+        const assistantMessageId = yield* getOrCreateAssistantMessageId({
+          threadId: thread.id,
+          event,
+          ...(turnId ? { turnId } : {}),
+        });
         if (turnId) {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
@@ -1076,6 +1297,49 @@ const make = Effect.gen(function* () {
         }
       }
 
+      const pauseForUserTurnId =
+        event.type === "request.opened" || event.type === "user-input.requested"
+          ? toTurnId(event.turnId)
+          : undefined;
+      if (pauseForUserTurnId) {
+        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
+          serverSettingsService.getSettings,
+          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
+        );
+        const flushedMessageIds =
+          assistantDeliveryMode === "buffered"
+            ? yield* flushBufferedAssistantMessagesForTurn({
+                event,
+                threadId: thread.id,
+                turnId: pauseForUserTurnId,
+                createdAt: now,
+                commandTag:
+                  event.type === "request.opened"
+                    ? "assistant-delta-flush-on-request-opened"
+                    : "assistant-delta-flush-on-user-input-requested",
+              })
+            : new Set<MessageId>();
+        yield* finalizeActiveAssistantSegmentForTurn({
+          event,
+          threadId: thread.id,
+          turnId: pauseForUserTurnId,
+          createdAt: now,
+          commandTag:
+            event.type === "request.opened"
+              ? "assistant-complete-on-request-opened"
+              : "assistant-complete-on-user-input-requested",
+          finalDeltaCommandTag:
+            event.type === "request.opened"
+              ? "assistant-delta-finalize-on-request-opened"
+              : "assistant-delta-finalize-on-user-input-requested",
+          hasProjectedMessage: thread.messages.some(
+            (entry) =>
+              entry.role === "assistant" && entry.turnId === pauseForUserTurnId && entry.streaming,
+          ),
+          flushedMessageIds,
+        });
+      }
+
       if (proposedPlanDelta && proposedPlanDelta.length > 0) {
         const planId = proposedPlanIdFromEvent(event, thread.id);
         yield* appendBufferedProposedPlan(planId, proposedPlanDelta, now);
@@ -1100,32 +1364,56 @@ const make = Effect.gen(function* () {
           : undefined;
 
       if (assistantCompletion) {
-        const assistantMessageId = assistantCompletion.messageId;
         const turnId = toTurnId(event.turnId);
+        const activeAssistantMessageId = turnId
+          ? yield* getActiveAssistantMessageIdForTurn(thread.id, turnId)
+          : Option.none<MessageId>();
+        const hasAssistantMessagesForTurn =
+          turnId !== undefined
+            ? thread.messages.some((entry) => entry.role === "assistant" && entry.turnId === turnId)
+            : false;
+        const assistantMessageId = Option.getOrElse(
+          activeAssistantMessageId,
+          () => assistantCompletion.messageId,
+        );
         const existingAssistantMessage = thread.messages.find(
           (entry) => entry.id === assistantMessageId,
         );
         const shouldApplyFallbackCompletionText =
           !existingAssistantMessage || existingAssistantMessage.text.length === 0;
-        if (turnId) {
-          yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
+
+        const shouldSkipRedundantCompletion =
+          Option.isNone(activeAssistantMessageId) &&
+          turnId !== undefined &&
+          hasAssistantMessagesForTurn &&
+          (assistantCompletion.fallbackText?.trim().length ?? 0) === 0;
+
+        if (!shouldSkipRedundantCompletion) {
+          if (turnId && Option.isNone(activeAssistantMessageId)) {
+            yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
+          }
+
+          yield* finalizeAssistantMessage({
+            event,
+            threadId: thread.id,
+            messageId: assistantMessageId,
+            ...(turnId ? { turnId } : {}),
+            createdAt: now,
+            commandTag: "assistant-complete",
+            finalDeltaCommandTag: "assistant-delta-finalize",
+            hasProjectedMessage: existingAssistantMessage !== undefined,
+            ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
+              ? { fallbackText: assistantCompletion.fallbackText }
+              : {}),
+          });
+
+          if (turnId) {
+            yield* forgetAssistantMessageId(thread.id, turnId, assistantMessageId);
+          }
         }
 
-        yield* finalizeAssistantMessage({
-          event,
-          threadId: thread.id,
-          messageId: assistantMessageId,
-          ...(turnId ? { turnId } : {}),
-          createdAt: now,
-          commandTag: "assistant-complete",
-          finalDeltaCommandTag: "assistant-delta-finalize",
-          ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
-            ? { fallbackText: assistantCompletion.fallbackText }
-            : {}),
-        });
-
         if (turnId) {
-          yield* forgetAssistantMessageId(thread.id, turnId, assistantMessageId);
+          yield* clearAssistantSegmentStateForTurn(thread.id, turnId);
         }
       }
 
@@ -1156,10 +1444,14 @@ const make = Effect.gen(function* () {
                 createdAt: now,
                 commandTag: "assistant-complete-finalize",
                 finalDeltaCommandTag: "assistant-delta-finalize-fallback",
+                hasProjectedMessage: thread.messages.some(
+                  (entry) => entry.id === assistantMessageId,
+                ),
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);
           yield* clearAssistantMessageIdsForTurn(thread.id, turnId);
+          yield* clearAssistantSegmentStateForTurn(thread.id, turnId);
 
           yield* finalizeBufferedProposedPlan({
             event,
