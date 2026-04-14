@@ -132,6 +132,7 @@ const makeCursorTextGeneration = Effect.gen(function* () {
         cwd,
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
       });
+      yield* Effect.addFinalizer(() => runtime.close);
 
       yield* runtime.handleSessionUpdate((notification) => {
         const update = notification.update;
