@@ -1003,6 +1003,7 @@ async function ensureSavedEnvironmentConnection(
     readonly bearerToken?: string;
     readonly role?: AuthSessionRole | null;
     readonly serverConfig?: ServerConfig | null;
+    readonly _sshAuthRetryCount?: number;
   },
 ): Promise<EnvironmentConnection> {
   const existing = environmentConnections.get(record.environmentId);
@@ -1105,6 +1106,13 @@ async function ensureSavedEnvironmentConnection(
           });
         }
 
+        const retryCount = options?._sshAuthRetryCount ?? 0;
+        if (retryCount >= 2) {
+          throw new Error("SSH authentication failed after retrying with fresh tokens.", {
+            cause: error,
+          });
+        }
+
         const issued = await issueDesktopSshBearerSession(activeRecord);
         activeRecord = issued.record;
         bearerToken = issued.bearerToken;
@@ -1115,6 +1123,7 @@ async function ensureSavedEnvironmentConnection(
           bearerToken,
           role: roleHint,
           serverConfig: options?.serverConfig ?? null,
+          _sshAuthRetryCount: retryCount + 1,
         });
       }
       registerConnection(connection);
