@@ -137,6 +137,11 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     ),
   ).pipe(Effect.forkScoped);
 
+  yield* applySnapshot(initialSettings, { forceRefresh: true }).pipe(
+    Effect.ignoreCause({ log: true }),
+    Effect.forkScoped,
+  );
+
   return {
     getSnapshot: input.getSettings.pipe(
       Effect.flatMap(applySnapshot),

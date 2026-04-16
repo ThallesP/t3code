@@ -239,6 +239,9 @@ export const ProviderRegistryLive = Layer.effect(
     yield* Stream.runForEach(cursorProvider.streamChanges, (provider) =>
       syncProvider(provider),
     ).pipe(Effect.forkScoped);
+    yield* loadProviders(codexProvider, claudeProvider, cursorProvider).pipe(
+      Effect.flatMap((providers) => upsertProviders(providers, { publish: false })),
+    );
 
     return {
       getProviders: Ref.get(providersRef),

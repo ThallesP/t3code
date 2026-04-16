@@ -80,43 +80,44 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
-  it.effect("keeps the initial snapshot until an explicit refresh runs", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const checkCalls = yield* Ref.make(0);
-        const provider = yield* makeManagedServerProvider<TestSettings>({
-          getSettings: Effect.succeed({ enabled: true }),
-          streamSettings: Stream.empty,
-          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
-          initialSnapshot: () => initialSnapshot,
-          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
-            Effect.as(refreshedSnapshot),
-          ),
-          refreshInterval: "1 hour",
-        });
+  it.effect(
+    "runs the initial provider check in the background and streams the refreshed snapshot",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const checkCalls = yield* Ref.make(0);
+          const releaseCheck = yield* Deferred.make<void>();
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => initialSnapshot,
+            checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+              Effect.flatMap(() => Deferred.await(releaseCheck)),
+              Effect.as(refreshedSnapshot),
+            ),
+            refreshInterval: "1 hour",
+          });
 
-        const initial = yield* provider.getSnapshot;
-        const beforeRefresh = yield* provider.getSnapshot;
-        assert.deepStrictEqual(initial, initialSnapshot);
-        assert.deepStrictEqual(beforeRefresh, initialSnapshot);
-        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+          const initial = yield* provider.getSnapshot;
+          assert.deepStrictEqual(initial, initialSnapshot);
 
-        const updatesFiber = yield* Stream.take(provider.streamChanges, 1).pipe(
-          Stream.runCollect,
-          Effect.forkChild,
-        );
-        yield* Effect.yieldNow;
+          const updatesFiber = yield* Stream.take(provider.streamChanges, 1).pipe(
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* Effect.yieldNow;
 
-        const refreshed = yield* provider.refresh;
-        const updates = Array.from(yield* Fiber.join(updatesFiber));
-        const latest = yield* provider.getSnapshot;
+          yield* Deferred.succeed(releaseCheck, undefined);
 
-        assert.deepStrictEqual(refreshed, refreshedSnapshot);
-        assert.deepStrictEqual(updates, [refreshedSnapshot]);
-        assert.deepStrictEqual(latest, refreshedSnapshot);
-        assert.strictEqual(yield* Ref.get(checkCalls), 1);
-      }),
-    ),
+          const updates = Array.from(yield* Fiber.join(updatesFiber));
+          const latest = yield* provider.getSnapshot;
+
+          assert.deepStrictEqual(updates, [refreshedSnapshot]);
+          assert.deepStrictEqual(latest, refreshedSnapshot);
+          assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        }),
+      ),
   );
 
   it.effect("reruns the provider check when streamed settings change", () =>
@@ -125,32 +126,40 @@ describe("makeManagedServerProvider", () => {
         const settingsRef = yield* Ref.make<TestSettings>({ enabled: true });
         const settingsChanges = yield* PubSub.unbounded<TestSettings>();
         const checkCalls = yield* Ref.make(0);
+        const releaseInitialCheck = yield* Deferred.make<void>();
+        const releaseSettingsCheck = yield* Deferred.make<void>();
         const provider = yield* makeManagedServerProvider<TestSettings>({
           getSettings: Ref.get(settingsRef),
           streamSettings: Stream.fromPubSub(settingsChanges),
           haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
           initialSnapshot: () => initialSnapshot,
-          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
-            Effect.as(refreshedSnapshot),
+          checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Deferred.await(releaseInitialCheck).pipe(Effect.as(refreshedSnapshot))
+                : Deferred.await(releaseSettingsCheck).pipe(Effect.as(refreshedSnapshotSecond)),
+            ),
           ),
           refreshInterval: "1 hour",
         });
 
-        const updatesFiber = yield* Stream.take(provider.streamChanges, 1).pipe(
+        const updatesFiber = yield* Stream.take(provider.streamChanges, 2).pipe(
           Stream.runCollect,
           Effect.forkChild,
         );
         yield* Effect.yieldNow;
 
+        yield* Deferred.succeed(releaseInitialCheck, undefined);
         yield* Ref.set(settingsRef, { enabled: false });
         yield* PubSub.publish(settingsChanges, { enabled: false });
+        yield* Deferred.succeed(releaseSettingsCheck, undefined);
 
         const updates = Array.from(yield* Fiber.join(updatesFiber));
         const latest = yield* provider.getSnapshot;
 
-        assert.deepStrictEqual(updates, [refreshedSnapshot]);
-        assert.deepStrictEqual(latest, refreshedSnapshot);
-        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        assert.deepStrictEqual(updates, [refreshedSnapshot, refreshedSnapshotSecond]);
+        assert.deepStrictEqual(latest, refreshedSnapshotSecond);
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
       }),
     ),
   );
@@ -159,12 +168,13 @@ describe("makeManagedServerProvider", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const releaseEnrichment = yield* Deferred.make<void>();
+        const releaseCheck = yield* Deferred.make<void>();
         const provider = yield* makeManagedServerProvider<TestSettings>({
           getSettings: Effect.succeed({ enabled: true }),
           streamSettings: Stream.empty,
           haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
           initialSnapshot: () => initialSnapshot,
-          checkProvider: Effect.succeed(refreshedSnapshot),
+          checkProvider: Deferred.await(releaseCheck).pipe(Effect.as(refreshedSnapshot)),
           enrichSnapshot: ({ publishSnapshot }) =>
             Deferred.await(releaseEnrichment).pipe(
               Effect.flatMap(() => publishSnapshot(enrichedSnapshot)),
@@ -178,8 +188,7 @@ describe("makeManagedServerProvider", () => {
         );
         yield* Effect.yieldNow;
 
-        const refreshed = yield* provider.refresh;
-        assert.deepStrictEqual(refreshed, refreshedSnapshot);
+        yield* Deferred.succeed(releaseCheck, undefined);
 
         yield* Deferred.succeed(releaseEnrichment, undefined);
 
@@ -199,13 +208,18 @@ describe("makeManagedServerProvider", () => {
         const refreshCount = yield* Ref.make(0);
         const firstCallbackReady = yield* Deferred.make<void>();
         const secondCallbackReady = yield* Deferred.make<void>();
+        const allowFirstRefresh = yield* Deferred.make<void>();
         const provider = yield* makeManagedServerProvider<TestSettings>({
           getSettings: Effect.succeed({ enabled: true }),
           streamSettings: Stream.empty,
           haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
           initialSnapshot: () => initialSnapshot,
           checkProvider: Ref.updateAndGet(refreshCount, (count) => count + 1).pipe(
-            Effect.map((count) => (count === 1 ? refreshedSnapshot : refreshedSnapshotSecond)),
+            Effect.flatMap((count) =>
+              count === 1
+                ? Deferred.await(allowFirstRefresh).pipe(Effect.as(refreshedSnapshot))
+                : Effect.succeed(refreshedSnapshotSecond),
+            ),
           ),
           enrichSnapshot: ({ publishSnapshot }) =>
             Effect.gen(function* () {
@@ -225,7 +239,7 @@ describe("makeManagedServerProvider", () => {
         );
         yield* Effect.yieldNow;
 
-        yield* provider.refresh;
+        yield* Deferred.succeed(allowFirstRefresh, undefined);
         yield* Deferred.await(firstCallbackReady);
 
         yield* provider.refresh;

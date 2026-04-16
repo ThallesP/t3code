@@ -944,6 +944,18 @@ function summarizeToolRawOutput(payload: Record<string, unknown> | null): string
   return null;
 }
 
+function isCommandToolDetail(payload: Record<string, unknown> | null, heading: string): boolean {
+  const data = asRecord(payload?.data);
+  const kind = asTrimmedString(data?.kind)?.toLowerCase();
+  const title = asTrimmedString(payload?.title ?? heading)?.toLowerCase();
+  return (
+    extractWorkLogItemType(payload) === "command_execution" ||
+    kind === "execute" ||
+    title === "terminal" ||
+    title === "ran command"
+  );
+}
+
 function extractToolDetail(
   payload: Record<string, unknown> | null,
   heading: string,
@@ -955,6 +967,10 @@ function extractToolDetail(
 
   if (detail && normalizedHeading !== normalizedDetail) {
     return detail;
+  }
+
+  if (isCommandToolDetail(payload, heading)) {
+    return null;
   }
 
   const rawOutputSummary = summarizeToolRawOutput(payload);

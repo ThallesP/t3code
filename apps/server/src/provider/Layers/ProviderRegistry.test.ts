@@ -654,10 +654,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest()))(
         ]);
       });
 
-      it.effect("does not probe provider health during registry startup", () =>
+      it.effect("probes enabled providers in the background during registry startup", () =>
         Effect.gen(function* () {
           let spawnCount = 0;
-          const serverSettings = yield* makeMutableServerSettingsService();
+          const serverSettings = yield* makeMutableServerSettingsService(
+            Schema.decodeSync(ServerSettings)(
+              deepMerge(DEFAULT_SERVER_SETTINGS, {
+                providers: {
+                  claudeAgent: { enabled: false },
+                  cursor: { enabled: false },
+                },
+              }),
+            ),
+          );
           const scope = yield* Scope.make();
           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
           const providerRegistryLayer = ProviderRegistryLive.pipe(
@@ -696,11 +705,18 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest()))(
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
-            assert.deepStrictEqual(yield* registry.getProviders, []);
-            assert.strictEqual(spawnCount, 0);
-
-            const refreshed = yield* registry.refresh("codex");
             assert.strictEqual(spawnCount > 0, true);
+            const refreshed = yield* Effect.gen(function* () {
+              for (let remainingAttempts = 50; remainingAttempts > 0; remainingAttempts -= 1) {
+                const providers = yield* registry.getProviders;
+                const codexProvider = providers.find((provider) => provider.provider === "codex");
+                if (codexProvider?.status === "ready") {
+                  return providers;
+                }
+                yield* Effect.sleep("10 millis");
+              }
+              return yield* registry.getProviders;
+            });
             assert.strictEqual(
               refreshed.find((provider) => provider.provider === "codex")?.status,
               "ready",
@@ -759,9 +775,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest()))(
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
-
-            const initial = yield* registry.getProviders;
-            assert.deepStrictEqual(initial, []);
 
             const refreshed = yield* registry.refresh("codex");
             assert.strictEqual(

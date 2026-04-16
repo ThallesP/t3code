@@ -450,12 +450,9 @@ export function resolveCursorAcpConfigUpdates(
 
 export const discoverCursorModelsViaAcp = (cursorSettings: CursorSettings) =>
   withCursorAcpProbeRuntime(cursorSettings, (acp) =>
-    Effect.gen(function* () {
-      const started = yield* acp.start();
-      return buildCursorDiscoveredModelsFromConfigOptions(
-        started.sessionSetupResult.configOptions ?? [],
-      );
-    }),
+    Effect.map(acp.start(), (started) =>
+      buildCursorDiscoveredModelsFromConfigOptions(started.sessionSetupResult.configOptions ?? []),
+    ),
   );
 
 export const discoverCursorModelCapabilitiesViaAcp = (
@@ -516,6 +513,11 @@ export const discoverCursorModelCapabilitiesViaAcp = (
                 probeModelOption?.type === "select"
                   ? probeModelOption.currentValue?.trim() || undefined
                   : undefined;
+              yield* Effect.annotateCurrentSpan({
+                "cursor.acp.model.value": modelSlug,
+                "cursor.acp.model.currentValue": probeCurrentModelValue,
+                "cursor.acp.config_option_id": probeModelOption?.id,
+              });
               const nextConfigOptions =
                 probeCurrentModelValue === modelSlug
                   ? probeConfigOptions
@@ -529,11 +531,12 @@ export const discoverCursorModelCapabilitiesViaAcp = (
             }),
           ).pipe(
             Effect.timeout(CURSOR_ACP_MODEL_CAPABILITY_TIMEOUT),
+            Effect.withSpan("cursor-acp-model-capability-probe"),
             Effect.catchCause((cause) =>
               Effect.logWarning("Cursor ACP capability probe failed", {
                 modelSlug,
                 cause: Cause.pretty(cause),
-              }).pipe(Effect.as(undefined)),
+              }),
             ),
           );
         },
@@ -554,7 +557,7 @@ export const discoverCursorModelCapabilitiesViaAcp = (
           capabilities: capabilitiesBySlug.get(modelChoice.value.trim()) ?? EMPTY_CAPABILITIES,
         })),
       );
-    }),
+    }).pipe(Effect.withSpan("cursor-acp-model-capability-discovery", {})),
   );
 
 export function getCursorFallbackModels(
