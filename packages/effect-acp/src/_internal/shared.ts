@@ -3,8 +3,8 @@ import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { RpcClientError } from "effect/unstable/rpc";
 
-import * as AcpSchema from "../_generated/schema.gen";
-import * as AcpError from "../errors";
+import * as AcpSchema from "../_generated/schema.gen.ts";
+import * as AcpError from "../errors.ts";
 
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
 

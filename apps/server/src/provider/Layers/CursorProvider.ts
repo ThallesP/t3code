@@ -22,11 +22,11 @@ import {
   isCommandMissingCause,
   providerModelsFromSettings,
   type CommandResult,
-} from "../providerSnapshot";
-import { makeManagedServerProvider } from "../makeManagedServerProvider";
-import { CursorProvider } from "../Services/CursorProvider";
-import { AcpSessionRuntime } from "../acp/AcpSessionRuntime";
-import { ServerSettingsService } from "../../serverSettings";
+} from "../providerSnapshot.ts";
+import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { CursorProvider } from "../Services/CursorProvider.ts";
+import { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 
 const PROVIDER = "cursor" as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = {

@@ -28,16 +28,16 @@ import {
   hasCustomModelProvider,
   parseAuthStatusFromOutput,
   readCodexConfigModelProvider,
-} from "./CodexProvider";
-import { checkClaudeProviderStatus, parseClaudeAuthStatusFromOutput } from "./ClaudeProvider";
+} from "./CodexProvider.ts";
+import { checkClaudeProviderStatus, parseClaudeAuthStatusFromOutput } from "./ClaudeProvider.ts";
 import {
   haveProvidersChanged,
   mergeProviderSnapshot,
   ProviderRegistryLive,
-} from "./ProviderRegistry";
-import { ServerConfig } from "../../config";
-import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings";
-import { ProviderRegistry } from "../Services/ProviderRegistry";
+} from "./ProviderRegistry.ts";
+import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
+import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 
 process.env.T3CODE_CURSOR_ENABLED = "1";
 

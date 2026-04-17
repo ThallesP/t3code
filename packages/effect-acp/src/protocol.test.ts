@@ -1,5 +1,5 @@
 import * as Path from "effect/Path";
-import * as AcpError from "./errors";
+import * as AcpError from "./errors.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -12,15 +12,15 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { it, assert } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
-import * as AcpSchema from "./_generated/schema.gen";
-import * as AcpProtocol from "./protocol";
+import * as AcpSchema from "./_generated/schema.gen.ts";
+import * as AcpProtocol from "./protocol.ts";
 import {
   encodeJsonl,
   jsonRpcNotification,
   jsonRpcRequest,
   jsonRpcResponse,
-} from "./_internal/shared";
-import { makeInMemoryStdio, makeTerminationError, makeChildStdio } from "./_internal/stdio";
+} from "./_internal/shared.ts";
+import { makeInMemoryStdio, makeTerminationError, makeChildStdio } from "./_internal/stdio.ts";
 
 const SessionCancelNotification = jsonRpcNotification(
   "session/cancel",

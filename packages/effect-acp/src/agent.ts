@@ -8,18 +8,18 @@ import * as Stdio from "effect/Stdio";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
 
-import * as AcpSchema from "./_generated/schema.gen";
-import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen";
-import * as AcpError from "./errors";
-import * as AcpProtocol from "./protocol";
-import * as AcpRpcs from "./rpc";
+import * as AcpSchema from "./_generated/schema.gen.ts";
+import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.ts";
+import * as AcpError from "./errors.ts";
+import * as AcpProtocol from "./protocol.ts";
+import * as AcpRpcs from "./rpc.ts";
 import {
   callRpc,
   decodeExtNotificationRegistration,
   decodeExtRequestRegistration,
   runHandler,
-} from "./_internal/shared";
-import * as AcpTerminal from "./terminal";
+} from "./_internal/shared.ts";
+import * as AcpTerminal from "./terminal.ts";
 
 export interface AcpAgentOptions {
   readonly logIncoming?: boolean;

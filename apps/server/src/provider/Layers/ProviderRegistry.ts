@@ -6,15 +6,15 @@
 import type { ProviderKind, ServerProvider } from "@t3tools/contracts";
 import { Effect, Equal, FileSystem, Layer, Path, PubSub, Ref, Stream } from "effect";
 
-import { ServerConfig } from "../../config";
-import { isCursorEnabled } from "../../cursorFeatureFlag";
-import { ClaudeProviderLive } from "./ClaudeProvider";
-import { CodexProviderLive } from "./CodexProvider";
-import { CursorProviderLive } from "./CursorProvider";
-import { ClaudeProvider } from "../Services/ClaudeProvider";
-import { CodexProvider } from "../Services/CodexProvider";
-import { CursorProvider } from "../Services/CursorProvider";
-import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry";
+import { ServerConfig } from "../../config.ts";
+import { isCursorEnabled } from "../../cursorFeatureFlag.ts";
+import { ClaudeProviderLive } from "./ClaudeProvider.ts";
+import { CodexProviderLive } from "./CodexProvider.ts";
+import { CursorProviderLive } from "./CursorProvider.ts";
+import { ClaudeProvider } from "../Services/ClaudeProvider.ts";
+import { CodexProvider } from "../Services/CodexProvider.ts";
+import { CursorProvider } from "../Services/CursorProvider.ts";
+import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
   hydrateCachedProvider,
   PROVIDER_CACHE_IDS,
@@ -22,7 +22,7 @@ import {
   readProviderStatusCache,
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
-} from "../providerStatusCache";
+} from "../providerStatusCache.ts";
 
 type ProviderSnapshotSource = {
   readonly provider: ProviderKind;

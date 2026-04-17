@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import * as AcpSchema from "./_generated/schema.gen";
+import * as AcpSchema from "./_generated/schema.gen.ts";
 
 export class AcpSpawnError extends Schema.TaggedErrorClass<AcpSpawnError>()("AcpSpawnError", {
   command: Schema.optional(Schema.String),

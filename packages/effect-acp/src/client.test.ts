@@ -14,11 +14,11 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
 
-import * as AcpClient from "./client";
-import * as AcpSchema from "./_generated/schema.gen";
-import * as AcpError from "./errors";
-import { encodeJsonl, jsonRpcRequest, jsonRpcResponse } from "./_internal/shared";
-import { makeInMemoryStdio } from "./_internal/stdio";
+import * as AcpClient from "./client.ts";
+import * as AcpSchema from "./_generated/schema.gen.ts";
+import * as AcpError from "./errors.ts";
+import { encodeJsonl, jsonRpcRequest, jsonRpcResponse } from "./_internal/shared.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const InitializeRequest = jsonRpcRequest("initialize", AcpSchema.InitializeRequest);
 const InitializeResponse = jsonRpcResponse(AcpSchema.InitializeResponse);

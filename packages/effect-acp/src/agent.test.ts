@@ -10,15 +10,15 @@ import * as Scope from "effect/Scope";
 
 import { assert, it } from "@effect/vitest";
 
-import * as AcpAgent from "./agent";
-import * as AcpSchema from "./_generated/schema.gen";
+import * as AcpAgent from "./agent.ts";
+import * as AcpSchema from "./_generated/schema.gen.ts";
 import {
   encodeJsonl,
   jsonRpcNotification,
   jsonRpcRequest,
   jsonRpcResponse,
-} from "./_internal/shared";
-import { makeInMemoryStdio } from "./_internal/stdio";
+} from "./_internal/shared.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const RequestPermissionRequest = jsonRpcRequest(
   "session/request_permission",
