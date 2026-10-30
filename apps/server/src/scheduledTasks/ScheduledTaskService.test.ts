@@ -412,6 +412,9 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
     >([]);
     // Rebind lands first, then the promotion commits between the shell read and the retry.
     const shellProjects = yield* Ref.make([scratch, promoted]);
+    // Commits a concurrent edit between an upsert's read and its write.
+    const concurrentEdit = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+    const sql = yield* SqlClient.SqlClient;
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -442,7 +445,8 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
           Layer.mock(SecretRequests.SecretRequests)({}),
           Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
             namedProjectsRoot: "/projects",
-            isScratchProject: () => Effect.succeed(false),
+            isScratchProject: () =>
+              Ref.getAndSet(concurrentEdit, Effect.void).pipe(Effect.flatten, Effect.as(false)),
           }),
           NodeCrypto.layer,
           Scheduler.layer,
@@ -483,6 +487,15 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
         [true, true, true],
       );
       assert.equal(new Set(attempts.map((attempt) => attempt.commandId)).size, 1);
+
+      yield* Ref.set(
+        concurrentEdit,
+        sql`UPDATE scheduled_tasks SET quiet = 0 WHERE task_id = ${task.id}`.pipe(Effect.orDie),
+      );
+      // A worktree edit reaches the scratch-project check, where the concurrent edit commits.
+      yield* service.upsert({ ...input, workspaceStrategy: { type: "worktree", baseRef: "main" } });
+      const [stored] = (yield* service.list()).tasks;
+      assert.isFalse(stored?.quiet);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
