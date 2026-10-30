@@ -781,7 +781,9 @@ export function NewTaskDraftScreen(props: {
             className="active:opacity-65"
           >
             <Text className="text-center text-sm text-foreground-muted">
-              or start without a project
+              {flow.startingWithoutProject
+                ? "Starting without a project…"
+                : "or start without a project"}
             </Text>
           </Pressable>
         ) : null}
