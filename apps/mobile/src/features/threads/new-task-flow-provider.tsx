@@ -170,6 +170,8 @@ type NewTaskFlowContextValue = {
   /** Whether the selected machine can move this draft to its Scratch project. */
   readonly canStartWithoutProject: boolean;
   readonly startWithoutProject: () => Promise<void>;
+  /** True while the draft is moving to Scratch; the screen locks so nothing is sent to the old project. */
+  readonly startingWithoutProject: boolean;
   /** The flow's project, read when a continuation resumes after an await. */
   readonly getSelectedProjectKey: () => string | null;
   /**
@@ -680,15 +682,18 @@ export function NewTaskFlowProvider(
   const canStartWithoutProject =
     !isScratchDraft &&
     scratchEnvironments.some((environment) => environment.environmentId === selectedEnvironmentId);
+  const [startingWithoutProject, setStartingWithoutProject] = useState(false);
   const scratchStartInFlightRef = useRef(false);
   // Moves the draft, and what is typed in it, to the selected machine's Scratch project.
   const startWithoutProject = async () => {
     if (!canStartWithoutProject || selectedEnvironmentId === null) return;
     if (scratchStartInFlightRef.current) return;
     scratchStartInFlightRef.current = true;
+    setStartingWithoutProject(true);
     const requestedProjectKey = readFlow().projectKey;
     const result = await openScratch({ environmentId: selectedEnvironmentId, input: {} });
     scratchStartInFlightRef.current = false;
+    setStartingWithoutProject(false);
     if (result._tag === "Success") {
       if (readFlow().projectKey === requestedProjectKey) setProject(result.value);
       return;
@@ -892,6 +897,7 @@ export function NewTaskFlowProvider(
     setProject,
     canStartWithoutProject,
     startWithoutProject,
+    startingWithoutProject,
     getSelectedProjectKey: () => readFlow().projectKey,
     missingRouteDraftId:
       routeDraftResolution.kind === "missing" ? (props.routeDraftId ?? null) : null,
