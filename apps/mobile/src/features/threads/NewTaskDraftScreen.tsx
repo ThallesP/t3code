@@ -265,6 +265,10 @@ export function NewTaskDraftScreen(props: {
   const loadedBranchesProjectKeyRef = useRef<string | null>(null);
   const [isReturningToProjectPicker, setIsReturningToProjectPicker] = useState(false);
   const incomingShare = props.incomingShareId ? getShare(props.incomingShareId) : null;
+  // Until the inbox loads, a route's share may still be reserved for this project.
+  const mayHaveReservedShareDestination = Boolean(
+    props.incomingShareId && (isIncomingShareInboxLoading || incomingShare?.destination),
+  );
   const requestedInitialProjectAvailable = Boolean(
     props.initialProjectRef?.environmentId &&
     props.initialProjectRef.projectId &&
@@ -769,7 +773,7 @@ export function NewTaskDraftScreen(props: {
           </Pressable>
           <Text className="text-2xl font-t3-medium tracking-tight text-foreground">?</Text>
         </View>
-        {flow.canStartWithoutProject && !incomingShare?.destination ? (
+        {flow.canStartWithoutProject && !mayHaveReservedShareDestination ? (
           <Pressable
             accessibilityRole="button"
             disabled={isComposerInteractionLocked}
