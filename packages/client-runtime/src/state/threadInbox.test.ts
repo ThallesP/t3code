@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import {
   createInboxReturnTracker,
+  isQuietRunWorking,
   isThreadWorking,
   sortInboxThreadsByReturn,
   sortWorkingThreadsBySend,
@@ -214,6 +215,35 @@ describe("createInboxReturnTracker", () => {
     vi.advanceTimersByTime(2_000);
     expect(notify).not.toHaveBeenCalled();
     expect(tracker.returnedAt(thread("a", false))).toBeUndefined();
+  });
+});
+
+describe("isQuietRunWorking", () => {
+  const settledThread = (input: { working: boolean; requestedAt: string }) => ({
+    ...thread("settled", input.working),
+    settledOverride: "settled" as const,
+    settledAt: "2026-06-01T01:00:00.000Z",
+    latestRun: {
+      runId: RunId.make("run:quiet"),
+      status: input.working ? ("running" as const) : ("completed" as const),
+      requestedAt: input.requestedAt,
+      startedAt: input.requestedAt,
+      completedAt: input.working ? null : "2026-06-01T03:00:00.000Z",
+      assistantMessageId: null,
+    },
+  });
+
+  it("holds a settled thread on the Working shelf only while a run it started after settling works", () => {
+    const afterSettle = "2026-06-01T02:00:00.000Z";
+    expect(isQuietRunWorking(settledThread({ working: true, requestedAt: afterSettle }))).toBe(
+      true,
+    );
+    expect(isQuietRunWorking(settledThread({ working: false, requestedAt: afterSettle }))).toBe(
+      false,
+    );
+    expect(
+      isQuietRunWorking(settledThread({ working: true, requestedAt: "2026-06-01T00:30:00.000Z" })),
+    ).toBe(false);
   });
 });
 

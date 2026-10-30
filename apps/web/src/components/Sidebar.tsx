@@ -32,6 +32,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
   createInboxReturnTracker,
+  isQuietRunWorking,
   isThreadWorking,
 } from "@t3tools/client-runtime/state/thread-inbox";
 import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
@@ -644,7 +645,10 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     } else {
       const section = resolveSidebarThreadSection({
         snoozed: configLoaded && effectiveSnoozed(thread, { now: preciseNow }),
-        settled: configLoaded && effectiveSettled(thread),
+        settled:
+          configLoaded &&
+          effectiveSettled(thread) &&
+          !(workingShelfEnabled && isQuietRunWorking(thread)),
         pinned: thread.pinnedAt != null,
       });
       (section === "snoozed"

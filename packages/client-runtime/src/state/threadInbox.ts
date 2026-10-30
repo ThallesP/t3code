@@ -1,7 +1,7 @@
 // @effect-diagnostics globalTimers:off - Shelf placement timers run in web and native clients, outside an Effect runtime.
 import { threadRuntimeIsActive, type EnvironmentThreadShell } from "./models.ts";
 import { toSortableTimestamp } from "./threadSort.ts";
-import { effectiveSnoozed } from "./threadSettled.ts";
+import { effectiveSnoozed, runStartedSinceSettled } from "./threadSettled.ts";
 
 type WorkingThreadInput = Pick<
   EnvironmentThreadShell,
@@ -28,6 +28,17 @@ export function isThreadWorking(thread: WorkingThreadInput): boolean {
     run.status !== "waiting" &&
     thread.runtime?.activeRunId !== run.runId;
   return !(thread.interactionMode === "plan" && thread.hasActionableProposedPlan && runSettled);
+}
+
+/** A quiet run leaves its thread settled, but the Working shelf still shows it while it runs. */
+export function isQuietRunWorking(
+  thread: WorkingThreadInput & Pick<EnvironmentThreadShell, "settledOverride" | "settledAt">,
+): boolean {
+  return (
+    thread.settledOverride === "settled" &&
+    runStartedSinceSettled(thread) &&
+    isThreadWorking(thread)
+  );
 }
 
 type InboxThreadInput = Pick<

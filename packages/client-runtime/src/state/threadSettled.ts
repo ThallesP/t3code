@@ -98,10 +98,16 @@ export interface ThreadSettledShell extends ThreadSnoozeShell {
  */
 export function effectiveSettled(shell: ThreadSettledShell): boolean {
   if (shell.settledOverride !== "settled") return false;
-  const requestedAt = (shell.latestRun ?? shell.latestTurn)?.requestedAt;
-  if (shell.settledAt == null || requestedAt == null) return true;
-  if (Date.parse(requestedAt) <= Date.parse(shell.settledAt)) return true;
+  if (!runStartedSinceSettled(shell)) return true;
   return !threadRaisedHandSince(shell, shell.settledAt);
+}
+
+export function runStartedSinceSettled(
+  shell: Pick<ThreadSettledShell, "settledAt" | "latestRun" | "latestTurn">,
+): boolean {
+  const requestedAt = (shell.latestRun ?? shell.latestTurn)?.requestedAt;
+  if (shell.settledAt == null || requestedAt == null) return false;
+  return Date.parse(requestedAt) > Date.parse(shell.settledAt);
 }
 
 function threadRaisedHandSince(shell: ThreadSnoozeShell, since: string | null | undefined) {

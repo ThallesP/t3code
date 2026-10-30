@@ -19,6 +19,7 @@ import {
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
 import {
   createInboxReturnTracker,
+  isQuietRunWorking,
   isThreadWorking,
   sortInboxThreadsByReturn,
   sortWorkingThreadsBySend,
@@ -691,7 +692,12 @@ export function buildThreadListV2Items(input: {
     }
     const hasQueuedMessages =
       queuedThreadKeys?.has(`${thread.environmentId}:${thread.id}`) === true;
-    if (supportsSettlement && effectiveSettled(thread) && !hasQueuedMessages) {
+    if (
+      supportsSettlement &&
+      effectiveSettled(thread) &&
+      !hasQueuedMessages &&
+      !(workingShelfEnabled && isQuietRunWorking(thread))
+    ) {
       settled.push(thread);
     } else if (thread.pinnedAt != null) {
       pinned.push(thread);
