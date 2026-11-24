@@ -115,7 +115,13 @@ export default mergeConfig(
         ? ["src/bin.ts"]
         : packExecutable
           ? ["src/binMain.ts"]
-          : ["src/bin.ts", "src/claude-history-worker.ts", "src/process-launcher.ts"],
+          : [
+              "src/bin.ts",
+              // Its own file, so an installed T3 Code can load a custom build's CLI by path.
+              "src/binMain.ts",
+              "src/claude-history-worker.ts",
+              "src/process-launcher.ts",
+            ],
       outDir: packBootstrap ? "dist-exe" : packExecutable ? cliAssetDir : "dist",
       sourcemap: !packExecutable,
       clean: true,
@@ -153,6 +159,10 @@ export default mergeConfig(
         __T3CODE_BUILD_CHANNEL__: JSON.stringify(cliBuildChannel),
         __T3CODE_TELEMETRY_CHANNEL__: JSON.stringify(telemetryChannel),
         __T3CODE_BUILD_RELAY_URL__: JSON.stringify(repoEnv.T3CODE_RELAY_URL?.trim() ?? ""),
+        // Where `v<version>` of this build's source can be cloned from, when not the upstream repo.
+        __T3CODE_BUILD_SOURCE_REPOSITORY__: JSON.stringify(
+          repoEnv.T3CODE_SOURCE_REPOSITORY?.trim() ?? "",
+        ),
         __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
           repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
         ),

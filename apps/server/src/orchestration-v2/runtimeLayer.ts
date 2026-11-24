@@ -66,6 +66,8 @@ import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as FeedbackStore from "../feedback/FeedbackStore.ts";
+import * as ModService from "../mods/ModService.ts";
+import * as ModApprovalRequests from "../mods/ModApprovalRequests.ts";
 import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
 
@@ -336,6 +338,10 @@ const layerSecretRequestsProvided = SecretRequests.layer.pipe(
 const layerFeedbackStoreProvided = FeedbackStore.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
+const layerModApprovalProvided = ModApprovalRequests.layer.pipe(
+  Layer.provideMerge(ModService.layer),
+  Layer.provide(layerThreadManagementProvided),
+);
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -444,6 +450,7 @@ export const layerProduction = Layer.mergeAll(
   layerScratchThreadPromotionProvided,
   layerSecretRequestsProvided,
   layerFeedbackStoreProvided,
+  layerModApprovalProvided,
   GuestShareService.layer.pipe(
     Layer.provide(Layer.merge(layerOrchestratorProvided, layerCommandOutputHubProvided)),
   ),

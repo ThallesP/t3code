@@ -10,6 +10,15 @@ import * as NodeUtil from "node:util";
 import { acquireServiceSelectionLock } from "./cloud/serviceSelectionLock.ts";
 import { RESTORE_OOMD_WATCH_SCRIPT } from "./cloud/userManagerOom.ts";
 import { windowsSystem32Path } from "@t3tools/shared/windowsSystem";
+import {
+  failRuntimeOverrideStartup,
+  installedStateDir,
+  markRuntimeOverrideTrialStarted,
+  resolveActiveRuntimeOverride,
+  RUNTIME_OVERRIDE_ENV_ACTIVE,
+  RUNTIME_OVERRIDE_ENV_ENTRY,
+  RUNTIME_OVERRIDE_ENV_STATIC_DIR,
+} from "@t3tools/shared/runtimeOverride";
 import { isNoCopyOnWrite, markNoCopyOnWrite } from "./noCopyOnWrite.ts";
 
 import type {
@@ -72,6 +81,7 @@ interface ManagedChild {
   readonly version: string;
   role: ChildRole;
   readonly process: NodeChildProcess.ChildProcess;
+  readonly runtimeOverrideBuildId?: string;
 }
 
 const runtimePaths = (baseDir: string, version: string) => {
@@ -1227,11 +1237,34 @@ export class Launcher {
       childVersion: version,
       ...(update === undefined ? {} : { update }),
     };
+    const overrideResolution =
+      role === "active"
+        ? resolveActiveRuntimeOverride({
+            stateDir: installedStateDir(this.#baseDir),
+            currentVersion: version,
+            env: this.#environment,
+          })
+        : ({ status: "stock", reason: "none" } as const);
+    const activeOverride =
+      overrideResolution.status === "override" ? overrideResolution.override : undefined;
+    if (activeOverride !== undefined) {
+      markRuntimeOverrideTrialStarted(installedStateDir(this.#baseDir));
+    }
     const spawnArguments = runtimeSpawnArguments(paths);
     const appendStdout = this.#output === undefined && isRegularFile(1);
     const appendStderr = this.#output === undefined && isRegularFile(2);
     const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
-      env: { ...this.#environment, [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) },
+      env: {
+        ...this.#environment,
+        [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context),
+        ...(activeOverride !== undefined
+          ? {
+              [RUNTIME_OVERRIDE_ENV_ACTIVE]: "1",
+              [RUNTIME_OVERRIDE_ENV_ENTRY]: activeOverride.entryPath,
+              [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: activeOverride.clientAssetsDir,
+            }
+          : {}),
+      },
       stdio:
         this.#output === undefined
           ? ["inherit", appendStdout ? "pipe" : "inherit", appendStderr ? "pipe" : "inherit", "ipc"]
@@ -1257,6 +1290,7 @@ export class Launcher {
       version,
       role,
       process: child,
+      ...(activeOverride !== undefined ? { runtimeOverrideBuildId: activeOverride.buildId } : {}),
     };
     this.#child = managed;
     child.on("message", (value) => {
@@ -1483,6 +1517,18 @@ export class Launcher {
     const pending = this.#state.update;
     if (pending?.status === "pending") {
       await this.#startTrial(pending);
+      return;
+    }
+    if (child.runtimeOverrideBuildId !== undefined) {
+      failRuntimeOverrideStartup({
+        stateDir: installedStateDir(this.#baseDir),
+        currentVersion: child.version,
+        message: `Custom build ${child.runtimeOverrideBuildId} exited unexpectedly (${String(code ?? signal ?? "unknown")}); fell back to stock T3 Code.`,
+      });
+      this.#log(
+        `[service-launcher] Custom build ${child.runtimeOverrideBuildId} exited; falling back to stock t3@${child.version}.\n`,
+      );
+      await this.#startChild(child.version, "active", this.#state.update);
       return;
     }
     if (

@@ -507,6 +507,7 @@ function itemIsProminent(item: OrchestrationV2TurnItem): boolean {
     item.type === "proposed_plan" ||
     item.type === "secret_request" ||
     item.type === "feedback_request" ||
+    item.type === "mod_approval_request" ||
     item.type === "link_request"
   );
 }
@@ -631,6 +632,8 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
       return "lock";
     case "feedback_request":
       return "message";
+    case "mod_approval_request":
+      return "wrench";
     case "link_request":
       return "globe";
   }
@@ -707,6 +710,8 @@ function itemSummary(
       return item.label;
     case "feedback_request":
       return resolve(msg("Feedback for the T3 team"));
+    case "mod_approval_request":
+      return item.preview.title;
     case "link_request":
       return resolve(msg("Link {target}", { target: linkRequestTargetName(item, resolve) }));
     case "dynamic_tool": {
@@ -779,6 +784,8 @@ function itemPreview(item: OrchestrationV2TurnItem, resolve: MessageResolver): s
       return item.reason || null;
     case "feedback_request":
       return item.preview.subject;
+    case "mod_approval_request":
+      return item.preview.intent;
     case "subagent":
       return item.result ?? item.progress ?? item.prompt;
     case "dynamic_tool":

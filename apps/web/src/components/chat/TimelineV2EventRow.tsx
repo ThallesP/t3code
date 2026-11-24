@@ -14,6 +14,7 @@ import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collaps
 import { EnvironmentSubagentAvatar, SubagentElapsed, V2LifecycleRow } from "./V2LifecycleRow";
 import { FeedbackRequestCard } from "./FeedbackRequestCard";
 import { LinkRequestCard } from "./LinkRequestCard";
+import { ModApprovalCard } from "./ModApprovalCard";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { TimelineRowCtx, type TimelineRow } from "./timelineRowContext";
 import { subagentGroupTiming } from "./TimelineV2EventRow.logic";
@@ -37,6 +38,16 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
     return (
       <FeedbackRequestCard
         environmentId={ctx.activeThreadEnvironmentId}
+        item={item}
+        visibility={visibility}
+      />
+    );
+  }
+  if (item.type === "mod_approval_request") {
+    return (
+      <ModApprovalCard
+        environmentId={ctx.activeThreadEnvironmentId}
+        threadRef={ctx.threadRef}
         item={item}
         visibility={visibility}
       />

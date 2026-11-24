@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
@@ -12,6 +13,11 @@ export type PrimaryBackendStartup =
   | { readonly _tag: "Ready" }
   | ({ readonly _tag: "Failing" } & BackendStartupFailure);
 
+export interface ActiveDesktopRuntimeOverride {
+  readonly buildId: string;
+  readonly clientAssetsDir: string;
+}
+
 export class DesktopState extends Context.Service<
   DesktopState,
   {
@@ -20,6 +26,7 @@ export class DesktopState extends Context.Service<
     // Set by DesktopUpdates.configure, which runs before the first backend start.
     readonly canInstallUpdates: Ref.Ref<boolean>;
     readonly primaryBackendStartup: SubscriptionRef.SubscriptionRef<PrimaryBackendStartup>;
+    readonly activeRuntimeOverride: Ref.Ref<Option.Option<ActiveDesktopRuntimeOverride>>;
   }
 >()("@t3tools/desktop/app/DesktopState") {}
 
@@ -28,6 +35,7 @@ const make = Effect.all({
   quitting: Ref.make(false),
   canInstallUpdates: Ref.make(false),
   primaryBackendStartup: SubscriptionRef.make<PrimaryBackendStartup>({ _tag: "Starting" }),
+  activeRuntimeOverride: Ref.make<Option.Option<ActiveDesktopRuntimeOverride>>(Option.none()),
 });
 
 export const layer = Layer.effect(DesktopState, make);

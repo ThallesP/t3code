@@ -456,6 +456,11 @@ import {
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import { AgentFeedbackAnswerInput, AgentFeedbackRequestError } from "./agentFeedback.ts";
 import {
+  ModApprovalAnswerInput,
+  ModApprovalAnswerResult,
+  ModApprovalRequestError,
+} from "./modApproval.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -651,6 +656,7 @@ export const WS_METHODS = {
   scheduledTasksRotateWebhookToken: "scheduledTasks.rotateWebhookToken",
   secretsAnswerRequest: "secrets.answerRequest",
   agentFeedbackAnswerRequest: "agentFeedback.answerRequest",
+  modApprovalAnswerRequest: "modApproval.answerRequest",
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
@@ -2421,6 +2427,12 @@ const WsAgentFeedbackAnswerRequestRpc = Rpc.make(WS_METHODS.agentFeedbackAnswerR
   error: Schema.Union([AgentFeedbackRequestError, EnvironmentAuthorizationError]),
 });
 
+const WsModApprovalAnswerRequestRpc = Rpc.make(WS_METHODS.modApprovalAnswerRequest, {
+  payload: ModApprovalAnswerInput,
+  success: ModApprovalAnswerResult,
+  error: Schema.Union([ModApprovalRequestError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
   {
@@ -2557,6 +2569,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksRotateWebhookTokenRpc,
   WsSecretsAnswerRequestRpc,
   WsAgentFeedbackAnswerRequestRpc,
+  WsModApprovalAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,

@@ -2,6 +2,10 @@ import {
   DESKTOP_UPDATE_IN_PROGRESS_MARKER_FILE,
   DESKTOP_UPDATE_IN_PROGRESS_TTL_MS,
 } from "@t3tools/contracts";
+import {
+  failRuntimeOverrideStartup,
+  markRuntimeOverrideHealthy,
+} from "@t3tools/shared/runtimeOverride";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -11,6 +15,7 @@ import * as FiberHandle from "effect/FiberHandle";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -150,7 +155,7 @@ export const layer = Layer.effect(
     const electronDialog = yield* ElectronDialog.ElectronDialog;
     const electronApp = yield* ElectronApp.ElectronApp;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
-    const { primaryBackendStartup } = yield* DesktopState.DesktopState;
+    const { primaryBackendStartup, activeRuntimeOverride } = yield* DesktopState.DesktopState;
     const recovery = yield* makeRecovery;
     // Parent instance scopes to the pool so shutdown runs stop finalizers before the OS kills backends.
     const layerScope = yield* Scope.Scope;
@@ -263,7 +268,13 @@ export const layer = Layer.effect(
           }),
       // Absorb window errors so readiness can reset restartAttempt.
       onReady: (httpBaseUrl, pid) =>
-        FiberHandle.run(updateMarkerWait, releaseUpdateMarker(httpBaseUrl, pid)).pipe(
+        Ref.get(activeRuntimeOverride).pipe(
+          Effect.tap((override) =>
+            Option.isSome(override)
+              ? Effect.sync(() => markRuntimeOverrideHealthy(environment.stateDir))
+              : Effect.void,
+          ),
+          Effect.andThen(FiberHandle.run(updateMarkerWait, releaseUpdateMarker(httpBaseUrl, pid))),
           Effect.andThen(reloadStaleMain),
           Effect.andThen(desktopWindow.handleBackendReady(httpBaseUrl)),
           // Only once the main window exists, so the recovery window never closes into nothing.
@@ -274,8 +285,25 @@ export const layer = Layer.effect(
             }),
           ),
         ),
-      onStartupFailure: (failure) =>
-        SubscriptionRef.set(primaryBackendStartup, { _tag: "Failing", ...failure }),
+      onStartupFailure: Effect.fn("desktop.backendPool.primaryStartupFailure")(function* (
+        failure: DesktopBackendManager.BackendStartupFailure,
+      ) {
+        const override = yield* Ref.get(activeRuntimeOverride);
+        if (Option.isSome(override) && !primaryWasReady) {
+          yield* logBackendPoolWarning(
+            "custom runtime override failed startup; falling back to stock T3 Code",
+            { buildId: override.value.buildId, reason: failure.reason },
+          );
+          failRuntimeOverrideStartup({
+            stateDir: environment.stateDir,
+            currentVersion: environment.appVersion,
+            message: `Custom build ${override.value.buildId} failed during startup (${failure.reason}); fell back to stock T3 Code.`,
+          });
+          yield* Ref.set(activeRuntimeOverride, Option.none());
+          reloadMainOnReady = true;
+        }
+        yield* SubscriptionRef.set(primaryBackendStartup, { _tag: "Failing", ...failure });
+      }),
       onShutdown: () =>
         FiberHandle.clear(updateMarkerWait).pipe(
           Effect.andThen(desktopWindow.handleBackendNotReady),

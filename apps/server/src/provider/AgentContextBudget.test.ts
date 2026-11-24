@@ -45,6 +45,8 @@ import { PullRequestService } from "../pullRequest/PullRequestService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import { SecretRequests } from "../secrets/SecretRequests.ts";
 import { FeedbackStore } from "../feedback/FeedbackStore.ts";
+import { ModApprovalRequests } from "../mods/ModApprovalRequests.ts";
+import { ModService } from "../mods/ModService.ts";
 import { AnalyticsService } from "../telemetry/AnalyticsService.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
@@ -89,6 +91,8 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ScheduledTaskService)({}),
   Layer.mock(SecretRequests)({}),
   Layer.mock(FeedbackStore)({}),
+  Layer.mock(ModService)({}),
+  Layer.mock(ModApprovalRequests)({}),
   NodeSqliteClient.layer({ filename: ":memory:" }),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-context-budget-" }),
   Layer.mock(ServerEnvironment)({}),

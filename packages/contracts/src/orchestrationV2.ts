@@ -12,6 +12,7 @@ import {
   AgentFeedbackRequestStatus,
   AgentFeedbackTrace,
 } from "./agentFeedback.ts";
+import { ModApprovalPreview, ModApprovalRequestStatus } from "./modApproval.ts";
 import {
   GitRefName,
   CheckpointId,
@@ -1896,6 +1897,13 @@ const OrchestrationV2FeedbackRequestFields = {
   feedbackStatus: AgentFeedbackRequestStatus,
 } as const;
 
+/** A built change to T3 Code itself, waiting in chat for the user to apply or decline it. */
+const OrchestrationV2ModApprovalRequestFields = {
+  type: Schema.Literal("mod_approval_request"),
+  preview: ModApprovalPreview,
+  modApprovalStatus: ModApprovalRequestStatus,
+} as const;
+
 export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2105,6 +2113,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2FeedbackRequestFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    ...OrchestrationV2ModApprovalRequestFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -3002,6 +3014,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2FeedbackRequestFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    ...OrchestrationV2ModApprovalRequestFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -4047,6 +4063,17 @@ const OrchestrationV2InternalCommand = Schema.Union([
     preview: AgentFeedbackPreview,
     conversationTrace: Schema.optionalKey(AgentFeedbackTrace),
     feedbackStatus: AgentFeedbackRequestStatus,
+  }),
+  /** Internal so no client can mark a local mod approved without server verification. */
+  Schema.Struct({
+    type: Schema.Literal("mod_approval_request.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    nodeId: NodeId,
+    turnItemId: TurnItemId,
+    preview: ModApprovalPreview,
+    modApprovalStatus: ModApprovalRequestStatus,
   }),
   /**
    * Records or updates a link an agent asked the user to make. Internal so no

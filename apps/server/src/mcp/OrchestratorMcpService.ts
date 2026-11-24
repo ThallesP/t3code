@@ -1217,6 +1217,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
       return `Asked the user for ${item.label}: ${item.secretStatus}.`;
     case "feedback_request":
       return `Asked the user to approve a ${item.preview.kind} report about ${item.preview.subject} for the T3 team: ${item.feedbackStatus}.`;
+    case "mod_approval_request":
+      return `Asked the user to apply the T3 Code mod "${item.preview.title}": ${item.modApprovalStatus}.`;
     case "link_request":
       return item.linkStatus === "linked"
         ? `Linked ${item.linkedLabel ?? item.url ?? "an environment"} (${item.linkedAccess}).`

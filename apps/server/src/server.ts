@@ -21,6 +21,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
 import * as FeatureFlags from "@t3tools/shared/FeatureFlags";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  markRuntimeOverrideHealthy,
+  RUNTIME_OVERRIDE_ENV_ACTIVE,
+} from "@t3tools/shared/runtimeOverride";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
@@ -973,6 +977,7 @@ const layerMakeServer = Layer.unwrap(
     const config = yield* ServerConfig.ServerConfig;
     // Before anything opens the database: one server per T3 home.
     const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
+    const runsCustomBuild = (yield* HostProcess.Environment)[RUNTIME_OVERRIDE_ENV_ACTIVE] === "1";
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const layerActivation = Layer.succeed(ServerActivation.ServerActivation, awaitActivation);
@@ -1383,7 +1388,10 @@ const layerMakeServer = Layer.unwrap(
     );
 
     const layerRuntimeServices = ServerRuntimeStartup.layerWithOptions({
-      activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
+      // A custom build that reaches activation has passed its trial start.
+      activate: Effect.sync(() => {
+        if (runsCustomBuild) markRuntimeOverrideHealthy(config.stateDir);
+      }).pipe(Effect.andThen(Deferred.succeed(activation, undefined)), Effect.asVoid),
       abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
       awaitAuxiliaryParked: Effect.all(
         [

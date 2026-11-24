@@ -70,6 +70,8 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ThemeToolkit } from "./toolkits/theme/tools.ts";
 import * as ThemeHandlers from "./toolkits/theme/handlers.ts";
+import { ModsToolkit } from "./toolkits/mods/tools.ts";
+import * as ModsHandlers from "./toolkits/mods/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
@@ -1437,6 +1439,8 @@ const layerThemeToolkit = toolkitRegistration(ThemeToolkit, ThemeHandlers.layer)
   Layer.provide(ThreadCommandExecutor.layer),
 );
 
+const layerModsToolkit = toolkitRegistration(ModsToolkit, ModsHandlers.layer);
+
 export const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
 // Reports may name any tool this server advertises, read when a report arrives.
@@ -1517,6 +1521,7 @@ export const layerTools = Layer.mergeAll(
   layerFeedbackToolkit,
   layerEnvironmentToolkit,
   layerThemeToolkit,
+  layerModsToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

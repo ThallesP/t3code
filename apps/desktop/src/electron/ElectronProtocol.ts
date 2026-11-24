@@ -55,7 +55,7 @@ export class ElectronProtocolUnregistrationError extends Schema.TaggedError<Elec
 export type DesktopProtocolRegistrationInput = {
   readonly scheme: string;
   readonly clerkFrontendApiHostname: string | undefined;
-} & ({ readonly targetOrigin: URL } | { readonly assetDirectory: string });
+} & ({ readonly targetOrigin: URL } | { readonly assetDirectory: string | Effect.Effect<string> });
 
 export class ElectronProtocol extends Context.Service<
   ElectronProtocol,
@@ -258,8 +258,12 @@ export const make = Effect.gen(function* () {
           try: () => {
             Electron.protocol.handle(input.scheme, async (request) => {
               if ("assetDirectory" in input) {
+                const resolvedDirectory =
+                  typeof input.assetDirectory === "string"
+                    ? input.assetDirectory
+                    : await runPromise(input.assetDirectory);
                 return withContentSecurityPolicy(
-                  await runPromise(serveDesktopAsset(request, input.assetDirectory)),
+                  await runPromise(serveDesktopAsset(request, resolvedDirectory)),
                   contentSecurityPolicy,
                 );
               }

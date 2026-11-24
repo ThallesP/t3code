@@ -719,6 +719,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "secret_request.record":
     case "link_request.record":
     case "feedback_request.record":
+    case "mod_approval_request.record":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -11337,6 +11338,89 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchModApprovalRequestRecord = Effect.fn(
+    "orchestrationV2.dispatch.modApprovalRequestRecord",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "mod_approval_request.record" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* projectionStore
+      .getThreadRecords(
+        command.threadId,
+        ["runs", "nodes", "turnItems", "attempts", "providerTurns"],
+        { turnItemTypes: ["mod_approval_request"], messageRoles: [] },
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    const fail = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const run = projection.runs.find((candidate) => candidate.id === command.runId);
+    const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
+    if (
+      existing !== undefined &&
+      (existing.type !== "mod_approval_request" || existing.runId !== command.runId)
+    ) {
+      return yield* fail(
+        `Turn item ${command.turnItemId} is not a mod approval request of run ${command.runId}.`,
+      );
+    }
+    if (existing !== undefined && existing.modApprovalStatus !== "pending") return;
+    if (run === undefined) return yield* fail(`Run ${command.runId} does not exist.`);
+    if (existing === undefined && run.rootNodeId !== command.nodeId) {
+      return yield* fail(`Node ${command.nodeId} is not the root of run ${command.runId}.`);
+    }
+    const nodeId = existing?.nodeId ?? command.nodeId;
+    const now = yield* DateTime.now;
+    const pending = command.modApprovalStatus === "pending";
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "turn-item.updated",
+      threadId: command.threadId,
+      runId: command.runId,
+      ...(nodeId === null ? {} : { nodeId }),
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: command.turnItemId,
+        threadId: command.threadId,
+        runId: command.runId,
+        nodeId,
+        providerThreadId: existing?.providerThreadId ?? run.providerThreadId,
+        providerTurnId:
+          existing === undefined
+            ? (providerTurnForRun(projection, run)?.id ?? null)
+            : existing.providerTurnId,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: existing?.ordinal ?? (yield* nextTurnItemOrdinal(projection)),
+        status: pending
+          ? "waiting"
+          : command.modApprovalStatus === "applied"
+            ? "completed"
+            : "cancelled",
+        title: command.preview.title,
+        startedAt: existing?.startedAt ?? now,
+        completedAt: pending ? null : now,
+        updatedAt: now,
+        type: "mod_approval_request",
+        preview: command.preview,
+        modApprovalStatus: command.modApprovalStatus,
+      },
+    });
+  });
+
   /**
    * Records or updates the card for a link an agent asked the user to make.
    * The pairing code goes straight to the link and never through orchestration.
@@ -16455,6 +16539,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "feedback_request.record":
         yield* dispatchFeedbackRequestRecord(command, events);
+        break;
+      case "mod_approval_request.record":
+        yield* dispatchModApprovalRequestRecord(command, events);
         break;
       case "link_request.record":
         yield* dispatchLinkRequestRecord(command, events, effects);

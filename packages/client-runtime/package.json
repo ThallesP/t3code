@@ -111,6 +111,10 @@
       "types": "./src/feedbackRequest.ts",
       "default": "./src/feedbackRequest.ts"
     },
+    "./mod-approval": {
+      "types": "./src/modApproval.ts",
+      "default": "./src/modApproval.ts"
+    },
     "./link-batch": {
       "types": "./src/linkBatch.ts",
       "default": "./src/linkBatch.ts"

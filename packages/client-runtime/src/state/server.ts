@@ -2028,6 +2028,15 @@ export function createServerEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.threadId, input.turnItemId]),
       },
     }),
+    answerModApproval: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:mod-approval:answer-request",
+      tag: WS_METHODS.modApprovalAnswerRequest,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.threadId, input.turnItemId]),
+      },
+    }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",
       tag: WS_METHODS.serverRefreshUsageRates,

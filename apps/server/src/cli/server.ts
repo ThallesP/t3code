@@ -45,7 +45,7 @@ const runServerCommand = Effect.fn("server.runServerCommand")(function* (
 });
 
 export const runDefaultServerCommand = Effect.fn("server.runDefaultServerCommand")(function* (
-  flags: CliServerFlags,
+  flags: CliServerFlags & { readonly stock: Option.Option<boolean> },
 ) {
   if (Option.isSome(flags.cwd)) {
     const cwd = flags.cwd.value.trim();

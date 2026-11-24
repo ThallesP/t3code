@@ -140,6 +140,7 @@ import * as Workflows from "./workflows/Workflows.ts";
 import * as WorkflowRuntime from "./workflows/WorkflowRuntime.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as FeedbackStore from "./feedback/FeedbackStore.ts";
+import * as ModApprovalRequests from "./mods/ModApprovalRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -895,6 +896,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(WorkflowRuntime.WorkflowDefinitions)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),
   Layer.mock(FeedbackStore.FeedbackStore)({}),
+  Layer.mock(ModApprovalRequests.ModApprovalRequests)({}),
   Layer.mock(SecretResolver.SecretResolver)({}),
   Layer.mock(GuestShareService.GuestShareService)({}),
   Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({}),

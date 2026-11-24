@@ -93,6 +93,12 @@ const lanFlag = Flag.Boolean("lan").pipe(
   ),
   Flag.optional,
 );
+const stockFlag = Flag.Boolean("stock").pipe(
+  Flag.withDescription(
+    "Ignore any active local runtime override and start stock T3 Code (equivalent to T3CODE_STOCK=1).",
+  ),
+  Flag.optional,
+);
 
 export const traceFileConfig = Config.String("T3CODE_TRACE_FILE").pipe(
   Config.option,
@@ -174,6 +180,10 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   lan: Config.Boolean("T3CODE_LAN").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  staticDir: Config.String("T3CODE_STATIC_DIR").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
 });
 
 const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
@@ -245,6 +255,7 @@ export const sharedServerCommandFlags = {
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
   lan: lanFlag,
+  stock: stockFlag,
 } as const;
 
 const resolveOptionPrecedence = <Value>(
@@ -415,7 +426,9 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     ),
     () => 443,
   );
-  const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
+  const staticDir = devUrl
+    ? undefined
+    : env.staticDir?.trim() || (yield* ServerConfig.resolveStaticDir());
   const explicitHost = resolveOptionPrecedence(
     normalizedFlags.host,
     Option.fromUndefinedOr(env.host),

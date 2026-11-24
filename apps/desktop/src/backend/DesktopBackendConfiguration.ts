@@ -8,6 +8,14 @@ import {
   isValidDesktopReadinessProof,
 } from "@t3tools/shared/desktopReadinessProof";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  markRuntimeOverrideTrialStarted,
+  resolveActiveRuntimeOverride,
+  RUNTIME_OVERRIDE_ENV_ACTIVE,
+  RUNTIME_OVERRIDE_ENV_ENABLE_DEV,
+  RUNTIME_OVERRIDE_ENV_ENTRY,
+  RUNTIME_OVERRIDE_ENV_STATIC_DIR,
+} from "@t3tools/shared/runtimeOverride";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -530,6 +538,9 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       readonly cliPath: Option.Option<string>;
       readonly shellEnvironmentPrepared: boolean;
       readonly desktopAppUpdate: boolean;
+      readonly activeRuntimeOverride: Ref.Ref<
+        Option.Option<DesktopState.ActiveDesktopRuntimeOverride>
+      >;
     },
   ): Effect.fn.Return<
     DesktopBackendManager.DesktopBackendStartConfig,
@@ -539,6 +550,37 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
     const backendExposure = yield* serverExposure.backendConfig;
+    const hostEnv = yield* HostProcess.Environment;
+    const hostArgv = yield* HostProcess.Arguments;
+
+    const allowOverride =
+      !environment.isDevelopment || hostEnv[RUNTIME_OVERRIDE_ENV_ENABLE_DEV] === "1";
+    const overrideResolution = allowOverride
+      ? resolveActiveRuntimeOverride({
+          stateDir: environment.stateDir,
+          currentVersion: environment.appVersion,
+          env: hostEnv,
+          argv: hostArgv,
+        })
+      : ({ status: "stock", reason: "none" } as const);
+
+    const activeOverride =
+      overrideResolution.status === "override" ? overrideResolution.override : null;
+    if (activeOverride !== null) {
+      markRuntimeOverrideTrialStarted(environment.stateDir);
+      yield* Ref.set(
+        input.activeRuntimeOverride,
+        Option.some({
+          buildId: activeOverride.buildId,
+          clientAssetsDir: activeOverride.clientAssetsDir,
+        }),
+      );
+    } else {
+      yield* Ref.set(input.activeRuntimeOverride, Option.none());
+    }
+
+    // Always the bundled entry: it loads a custom build itself, as every other install does.
+    const entryPath = environment.backendEntryPath;
 
     const bootstrap = {
       mode: "desktop" as const,
@@ -568,11 +610,11 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       // Packaged builds have a separate cache; --require prevents cache settings leaking to provider subprocesses.
       args: [
         ...(environment.isPackaged ? ["--require", environment.compileCachePath] : []),
-        environment.backendEntryPath,
+        entryPath,
         "--bootstrap-fd",
         "3",
       ],
-      entryPath: environment.backendEntryPath,
+      entryPath,
       cwd: environment.backendCwd,
       env: {
         ...backendChildEnvPatch(),
@@ -580,6 +622,13 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1",
         T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
         [DESKTOP_HOST_SCOPE_ENV]: input.hostScope,
+        ...(activeOverride !== null
+          ? {
+              [RUNTIME_OVERRIDE_ENV_ACTIVE]: "1",
+              [RUNTIME_OVERRIDE_ENV_ENTRY]: activeOverride.entryPath,
+              [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: activeOverride.clientAssetsDir,
+            }
+          : {}),
       },
       extendEnv: true,
       bootstrap,
@@ -879,6 +928,7 @@ export const make = Effect.gen(function* () {
       cliPath,
       shellEnvironmentPrepared,
       desktopAppUpdate: yield* Ref.get(desktopState.canInstallUpdates),
+      activeRuntimeOverride: desktopState.activeRuntimeOverride,
     }).pipe(
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),

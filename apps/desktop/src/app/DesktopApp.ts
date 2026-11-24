@@ -43,6 +43,7 @@ import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveActiveRuntimeOverride } from "@t3tools/shared/runtimeOverride";
 import { msg } from "gt-i18n";
 import { m } from "../i18n/messages.ts";
 
@@ -207,12 +208,40 @@ const startLocalBackend = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap start");
 
   const settings = yield* desktopSettings.get;
+  if (!environment.isDevelopment) {
+    const hostEnv = yield* HostProcess.Environment;
+    const hostArgv = yield* HostProcess.Arguments;
+    const overrideResolution = resolveActiveRuntimeOverride({
+      stateDir: environment.stateDir,
+      currentVersion: environment.appVersion,
+      env: hostEnv,
+      argv: hostArgv,
+    });
+    if (overrideResolution.status === "override") {
+      yield* Ref.set(
+        state.activeRuntimeOverride,
+        Option.some({
+          buildId: overrideResolution.override.buildId,
+          clientAssetsDir: overrideResolution.override.clientAssetsDir,
+        }),
+      );
+    }
+  }
   const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
   yield* electronProtocol.registerDesktopProtocol({
     scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
     ...(environment.isDevelopment
       ? { targetOrigin: Option.getOrThrow(environment.devServerUrl) }
-      : { assetDirectory: environment.clientAssetsDir }),
+      : {
+          assetDirectory: Ref.get(state.activeRuntimeOverride).pipe(
+            Effect.map(
+              Option.match({
+                onNone: () => environment.clientAssetsDir,
+                onSome: (override) => override.clientAssetsDir,
+              }),
+            ),
+          ),
+        }),
     clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
   });
   yield* installDesktopIpcHandlers();
