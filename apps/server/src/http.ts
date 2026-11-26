@@ -17,7 +17,9 @@ import {
   DESKTOP_READINESS_PROOF_PATH,
   desktopReadinessProof,
 } from "@t3tools/shared/desktopReadinessProof";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+import { readLiveClientAssetsDir, claimedRuntimeOverride } from "@t3tools/shared/runtimeOverride";
 import * as ByteSize from "effect/ByteSize";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -43,6 +45,7 @@ import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
+import packageJson from "../package.json" with { type: "json" };
 import * as ServerConfig from "./config.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
@@ -635,11 +638,9 @@ const decodeBuildManifest = Schema.decodeUnknownEffect(
   ),
 );
 
-const loadImmutableBuildAssets = Effect.gen(function* () {
-  const config = yield* ServerConfig.ServerConfig;
-  const staticDir =
-    config.staticDir ?? (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
-  if (!staticDir) return new Set<string>();
+const loadImmutableBuildAssets = Effect.fn("loadImmutableBuildAssets")(function* (
+  staticDir: string,
+) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   return yield* fileSystem.readFileString(path.join(staticDir, ".vite", "manifest.json")).pipe(
@@ -693,7 +694,8 @@ const SPA_FRAME_HEADERS = {
 };
 
 const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
-  function* (immutableBuildAssets: ReadonlySet<string>) {
+  // A mod can swap the client folder while the server runs, so the list is kept per folder.
+  function* (immutableBuildAssetsByDir: Map<string, ReadonlySet<string>>) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = requestUrl(request);
 
@@ -712,8 +714,17 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
       });
     }
 
+    const hostEnv = yield* HostProcess.Environment;
     const staticDir =
-      config.staticDir ?? (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
+      (config.devUrl === undefined && claimedRuntimeOverride() === null
+        ? readLiveClientAssetsDir({
+            stateDir: config.stateDir,
+            currentVersion: packageJson.version,
+            env: hostEnv,
+          })
+        : null) ??
+      config.staticDir ??
+      (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
     if (!staticDir && config.devUrl) {
       // `vp run dev --share --built` prints the pairing URL before its first
       // web build lands in apps/web/dist. Reload until it does.
@@ -728,6 +739,9 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
       });
     }
 
+    const immutableBuildAssets =
+      immutableBuildAssetsByDir.get(staticDir) ?? (yield* loadImmutableBuildAssets(staticDir));
+    immutableBuildAssetsByDir.set(staticDir, immutableBuildAssets);
     const path = yield* Path.Path;
     const staticRoot = path.resolve(staticDir);
     const staticRequestPath = url.value.pathname === "/" ? "/index.html" : url.value.pathname;
@@ -853,7 +867,8 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
 );
 
 export const layerStaticAndDevRoute = Layer.unwrap(
-  loadImmutableBuildAssets.pipe(
-    Effect.map((assets) => HttpRouter.add("GET", "*", handleStaticAndDevRequest(assets))),
-  ),
+  Effect.sync(() => {
+    const immutableBuildAssetsByDir = new Map<string, ReadonlySet<string>>();
+    return HttpRouter.add("GET", "*", handleStaticAndDevRequest(immutableBuildAssetsByDir));
+  }),
 );

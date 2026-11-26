@@ -23,7 +23,7 @@ import * as FeatureFlags from "@t3tools/shared/FeatureFlags";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   markRuntimeOverrideHealthy,
-  RUNTIME_OVERRIDE_ENV_ACTIVE,
+  claimedRuntimeOverride,
 } from "@t3tools/shared/runtimeOverride";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -232,6 +232,8 @@ import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsag
 import * as UsageService from "./usage/UsageService.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
+import * as ModBuildTransfer from "./mods/ModBuildTransfer.ts";
+import * as ServerRestartLayer from "./serverRestart.ts";
 import * as ThreadViewers from "./orchestration-v2/ThreadViewers.ts";
 import * as WorkflowForge from "./workflows/WorkflowForge.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
@@ -645,6 +647,7 @@ const layerTaskFolders = TaskFolders.layer.pipe(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(ServerRestartLayer.layer),
   Layer.provide(
     WorkflowForge.layer.pipe(
       Layer.provide(layerIssueService),
@@ -716,20 +719,6 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
-// The desktop app and the background service start the server again after it exits.
-const layerServerRestart = Layer.effect(
-  DatabaseStorage.ServerRestart,
-  Effect.gen(function* () {
-    const config = yield* ServerConfig.ServerConfig;
-    const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
-    // As in runServerCommand, only the desktop app passes a bootstrap token; `serve --mode desktop` by hand has no supervisor.
-    const desktopLaunched = config.mode === "desktop" && config.desktopBootstrapToken !== undefined;
-    if (!desktopLaunched && !launcher.managed) return null;
-    // Stop as a SIGTERM would: runMain's listener interrupts the server, so its shutdown path runs.
-    return Effect.sync(() => void process.emit("SIGTERM"));
-  }),
-);
-
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   ProviderHostPathWatcher.layer.pipe(Layer.provide(layerDesktopTelemetryReceiver)),
@@ -739,7 +728,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   DatabaseStorage.layer.pipe(
     Layer.provide(ProjectionMaintenance.layer),
-    Layer.provide(layerServerRestart),
+    Layer.provide(ServerRestartLayer.layer),
   ),
   layerThreadPullRequestWorker,
   KeepAwake.layer,
@@ -912,6 +901,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerDesktopReadinessProofRoute,
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
+    ModBuildTransfer.routeLayer,
     GuestHttp.layer,
     LinkThreadHttp.layer,
     DeviceHubProxy.layer,
@@ -977,7 +967,7 @@ const layerMakeServer = Layer.unwrap(
     const config = yield* ServerConfig.ServerConfig;
     // Before anything opens the database: one server per T3 home.
     const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
-    const runsCustomBuild = (yield* HostProcess.Environment)[RUNTIME_OVERRIDE_ENV_ACTIVE] === "1";
+    const runsCustomBuild = claimedRuntimeOverride() !== null;
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const layerActivation = Layer.succeed(ServerActivation.ServerActivation, awaitActivation);

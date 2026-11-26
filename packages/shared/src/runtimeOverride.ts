@@ -21,7 +21,8 @@ export interface RuntimeOverridePointer {
   readonly buildId: string;
   readonly baseVersion: string;
   readonly artifactSha256: string;
-  readonly entryPath: string;
+  /** Absent when the build only changes the web client: the installed server keeps running. */
+  readonly entryPath?: string;
   readonly clientAssetsDir: string;
   readonly mods: ReadonlyArray<RuntimeOverrideModSummary>;
   readonly activatedAt: string;
@@ -57,6 +58,8 @@ export interface SavedModMetadata {
   readonly verifySha256: string;
   /** Where the check is written before it runs; absent for a repo-root script. */
   readonly verifyPath?: string;
+  /** An update turned it off because it no longer fits. Gone once it is saved again. */
+  readonly needsRepair?: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -116,6 +119,27 @@ export function isStockModeRequested(
   return argv.includes("--stock");
 }
 
+const INFO_FLAGS = new Set(["--version", "--help", "-h", "--completions"]);
+const VALUE_FLAGS = new Set([
+  "--port",
+  "--host",
+  "--base-dir",
+  "--dev-url",
+  "--mode",
+  "--bootstrap-fd",
+  "--tailscale-serve-port",
+  "--log-level",
+]);
+
+// Launchers probe `t3 --version` before every start; only a real start may begin a build's trial.
+export function isServerStartInvocation(argv: ReadonlyArray<string>): boolean {
+  if (argv.some((arg) => INFO_FLAGS.has(arg))) return false;
+  const subcommand = argv.find(
+    (arg, index) => !arg.startsWith("-") && !VALUE_FLAGS.has(argv[index - 1] ?? ""),
+  );
+  return subcommand === undefined || subcommand === "serve" || subcommand === "start";
+}
+
 export function computeTextSha256(text: string): string {
   return NodeCrypto.createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -125,13 +149,15 @@ export function computeTextSha256(text: string): string {
  * Approval cards bind to this digest so the activated bundle matches what was verified.
  */
 export function computeRuntimeOverrideArtifactSha256(
-  entryPath: string,
+  entryPath: string | undefined,
   clientAssetsDir: string,
 ): string | null {
   try {
     const hash = NodeCrypto.createHash("sha256");
-    hash.update("entry:\0");
-    hash.update(NodeFS.readFileSync(entryPath));
+    if (entryPath !== undefined) {
+      hash.update("entry:\0");
+      hash.update(NodeFS.readFileSync(entryPath));
+    }
     hash.update("\0index:\0");
     hash.update(NodeFS.readFileSync(NodePath.join(clientAssetsDir, "index.html")));
     const viteManifestPath = NodePath.join(clientAssetsDir, ".vite", "manifest.json");
@@ -167,8 +193,8 @@ function parseRuntimeOverridePointer(raw: string): RuntimeOverridePointer | null
     !isNonEmptyString(parsed.baseVersion) ||
     typeof parsed.artifactSha256 !== "string" ||
     !SHA256_HEX_PATTERN.test(parsed.artifactSha256) ||
-    !isNonEmptyString(parsed.entryPath) ||
-    !NodePath.isAbsolute(parsed.entryPath) ||
+    (parsed.entryPath !== undefined &&
+      (!isNonEmptyString(parsed.entryPath) || !NodePath.isAbsolute(parsed.entryPath))) ||
     !isNonEmptyString(parsed.clientAssetsDir) ||
     !NodePath.isAbsolute(parsed.clientAssetsDir) ||
     !isNonEmptyString(parsed.activatedAt) ||
@@ -200,7 +226,7 @@ function parseRuntimeOverridePointer(raw: string): RuntimeOverridePointer | null
     buildId: parsed.buildId,
     baseVersion: parsed.baseVersion,
     artifactSha256: parsed.artifactSha256,
-    entryPath: parsed.entryPath,
+    ...(typeof parsed.entryPath === "string" ? { entryPath: parsed.entryPath } : {}),
     clientAssetsDir: parsed.clientAssetsDir,
     mods,
     activatedAt: parsed.activatedAt,
@@ -359,7 +385,7 @@ export function resolveActiveRuntimeOverride(input: {
     return recordAndDisable(input.stateDir, {
       schemaVersion: 1,
       reason: "version_mismatch",
-      message: `Customizations built for ${pointer.baseVersion} were paused after updating to ${input.currentVersion}. Run \`t3 mod upgrade\` or ask in chat to reapply.`,
+      message: `Customizations built for ${pointer.baseVersion} were paused after updating to ${input.currentVersion}. T3 Code rebuilds the ones that still fit by itself.`,
       buildId: pointer.buildId,
       overrideBaseVersion: pointer.baseVersion,
       currentVersion: input.currentVersion,
@@ -380,7 +406,10 @@ export function resolveActiveRuntimeOverride(input: {
   }
 
   const clientIndexPath = NodePath.join(pointer.clientAssetsDir, "index.html");
-  if (!NodeFS.existsSync(pointer.entryPath) || !NodeFS.existsSync(clientIndexPath)) {
+  if (
+    (pointer.entryPath !== undefined && !NodeFS.existsSync(pointer.entryPath)) ||
+    !NodeFS.existsSync(clientIndexPath)
+  ) {
     return recordAndDisable(input.stateDir, {
       schemaVersion: 1,
       reason: "missing_files",
@@ -453,6 +482,94 @@ export function failRuntimeOverrideStartup(input: {
   clearRuntimeOverridePointer(input.stateDir);
   writeRuntimeOverrideFallback(input.stateDir, record);
   return record;
+}
+
+const WEB_CLIENT_PATH_PATTERN = /^apps\/web\//;
+
+interface ClaimedRuntimeOverride {
+  readonly entryPath: string;
+  readonly clientAssetsDir: string | undefined;
+  /** The installed server's folder, where its interface and native packages are. */
+  readonly stockDir: string;
+}
+
+// A custom build is its own bundle with its own copy of this module, so the value is kept on
+// the process, not in module state.
+const CLAIMED_RUNTIME_OVERRIDE = Symbol.for("@t3tools/shared/runtimeOverride/claimed");
+const processSlot = globalThis as { [CLAIMED_RUNTIME_OVERRIDE]?: ClaimedRuntimeOverride | null };
+
+/**
+ * Takes the custom build a launcher handed this process through its environment, and removes
+ * those variables. The agents and shells a server starts inherit its environment: left in
+ * place, every `t3` they ran would load this build too, a dev server included.
+ */
+export function claimRuntimeOverride(
+  env: NodeJS.ProcessEnv,
+  stockDir: string,
+): ClaimedRuntimeOverride | null {
+  if (env[RUNTIME_OVERRIDE_ENV_ACTIVE] !== "1") return claimedRuntimeOverride();
+  const entryPath = env[RUNTIME_OVERRIDE_ENV_ENTRY]?.trim();
+  const claimed = entryPath
+    ? {
+        entryPath,
+        clientAssetsDir: env[RUNTIME_OVERRIDE_ENV_STATIC_DIR]?.trim() || undefined,
+        stockDir,
+      }
+    : null;
+  delete env[RUNTIME_OVERRIDE_ENV_ACTIVE];
+  delete env[RUNTIME_OVERRIDE_ENV_ENTRY];
+  delete env[RUNTIME_OVERRIDE_ENV_STATIC_DIR];
+  processSlot[CLAIMED_RUNTIME_OVERRIDE] = claimed;
+  return claimed;
+}
+
+/** The custom build this process runs, or `null` when it runs stock T3 Code. */
+export function claimedRuntimeOverride(): ClaimedRuntimeOverride | null {
+  return processSlot[CLAIMED_RUNTIME_OVERRIDE] ?? null;
+}
+
+export function releaseRuntimeOverride(): void {
+  processSlot[CLAIMED_RUNTIME_OVERRIDE] = null;
+}
+
+/** True when a change stays inside the web client, so the installed server can keep running. */
+export function isClientOnlyChange(files: ReadonlyArray<string>): boolean {
+  return files.length > 0 && files.every((file) => WEB_CLIENT_PATH_PATTERN.test(file));
+}
+
+/** What a server process needs to boot a custom build. A client-only build needs nothing. */
+export function runtimeOverrideEnv(
+  override: Pick<RuntimeOverridePointer, "entryPath" | "clientAssetsDir">,
+): Record<string, string> {
+  if (override.entryPath === undefined) return {};
+  return {
+    [RUNTIME_OVERRIDE_ENV_ACTIVE]: "1",
+    [RUNTIME_OVERRIDE_ENV_ENTRY]: override.entryPath,
+    [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: override.clientAssetsDir,
+  };
+}
+
+/**
+ * The client folder of an applied client-only build, read fresh so applying or turning one off
+ * shows on the next page load with no restart. Null means the installed client.
+ */
+export function readLiveClientAssetsDir(input: {
+  readonly stateDir: string;
+  readonly currentVersion: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly argv?: ReadonlyArray<string>;
+}): string | null {
+  if (isStockModeRequested(input.env ?? {}, input.argv)) return null;
+  const pointer = readRuntimeOverridePointer(input.stateDir);
+  if (
+    pointer === null ||
+    pointer.entryPath !== undefined ||
+    pointer.baseVersion !== input.currentVersion ||
+    !NodeFS.existsSync(NodePath.join(pointer.clientAssetsDir, "index.html"))
+  ) {
+    return null;
+  }
+  return pointer.clientAssetsDir;
 }
 
 const MIGRATION_PATH_PATTERN = /(?:^|\/)apps\/server\/src\/persistence\/migrations\//i;

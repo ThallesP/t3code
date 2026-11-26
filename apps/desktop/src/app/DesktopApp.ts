@@ -43,7 +43,10 @@ import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { resolveActiveRuntimeOverride } from "@t3tools/shared/runtimeOverride";
+import {
+  readLiveClientAssetsDir,
+  resolveActiveRuntimeOverride,
+} from "@t3tools/shared/runtimeOverride";
 import { msg } from "gt-i18n";
 import { m } from "../i18n/messages.ts";
 
@@ -208,16 +211,19 @@ const startLocalBackend = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap start");
 
   const settings = yield* desktopSettings.get;
+  const hostEnv = yield* HostProcess.Environment;
+  const hostArgv = yield* HostProcess.Arguments;
   if (!environment.isDevelopment) {
-    const hostEnv = yield* HostProcess.Environment;
-    const hostArgv = yield* HostProcess.Arguments;
     const overrideResolution = resolveActiveRuntimeOverride({
       stateDir: environment.stateDir,
       currentVersion: environment.appVersion,
       env: hostEnv,
       argv: hostArgv,
     });
-    if (overrideResolution.status === "override") {
+    if (
+      overrideResolution.status === "override" &&
+      overrideResolution.override.entryPath !== undefined
+    ) {
       yield* Ref.set(
         state.activeRuntimeOverride,
         Option.some({
@@ -233,12 +239,20 @@ const startLocalBackend = Effect.gen(function* () {
     ...(environment.isDevelopment
       ? { targetOrigin: Option.getOrThrow(environment.devServerUrl) }
       : {
+          // A client-only build shows on the next load; any other one waits for its backend.
           assetDirectory: Ref.get(state.activeRuntimeOverride).pipe(
             Effect.map(
-              Option.match({
-                onNone: () => environment.clientAssetsDir,
-                onSome: (override) => override.clientAssetsDir,
-              }),
+              (override) =>
+                readLiveClientAssetsDir({
+                  stateDir: environment.stateDir,
+                  currentVersion: environment.appVersion,
+                  env: hostEnv,
+                  argv: hostArgv,
+                }) ??
+                Option.match(override, {
+                  onNone: () => environment.clientAssetsDir,
+                  onSome: (active) => active.clientAssetsDir,
+                }),
             ),
           ),
         }),

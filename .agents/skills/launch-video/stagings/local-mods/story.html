@@ -1,0 +1,385 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Real-app story: each beat is a frozen page of the real app (beats/<name>.html, written by
+      snapshot.mjs from a staging scenario), stacked as iframes in .app. The app was frozen at a
+      1440×720 viewport; .app scales it 1.0556× into the 1520×760 window, so a point (x, y) in a
+      beat is canvas (40 + 1.0556·x, 26 + 1.0556·y).
+    -->
+    <style>
+      @font-face {
+        font-family: Inter;
+        src: url(inter.woff2) format("woff2");
+        font-weight: 100 900;
+      }
+      @font-face {
+        font-family: JB;
+        src: url(jbmono.woff2) format("woff2");
+        font-weight: 100 800;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      :root {
+        --text: #f1f3f7;
+        --muted: #a3a3a3;
+        --dim: #636368;
+      }
+      html,
+      body {
+        width: 1600px;
+        height: 900px;
+        overflow: hidden;
+        background: #000;
+        font-family: Inter, sans-serif;
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
+      }
+      .canvas {
+        position: relative;
+        width: 1600px;
+        height: 900px;
+        overflow: hidden;
+        background:
+          radial-gradient(1000px 520px at 50% 0%, rgba(52, 107, 241, 0.13), transparent 70%), #000;
+      }
+      .cam {
+        position: absolute;
+        inset: 0;
+        transform-origin: 0 0;
+      }
+      .win {
+        position: absolute;
+        left: 40px;
+        top: 26px;
+        width: 1520px;
+        height: 760px;
+        border-radius: 14px;
+        overflow: hidden;
+        background: #000;
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.1),
+          0 40px 120px rgba(0, 0, 0, 0.8);
+      }
+      .app {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1440px;
+        height: 720px;
+        transform: scale(1.05556);
+        transform-origin: 0 0;
+      }
+      .app iframe {
+        position: absolute;
+        inset: 0;
+        width: 1440px;
+        height: 720px;
+        border: 0;
+        opacity: 0;
+        background: #000;
+      }
+      .cursor {
+        position: absolute;
+        left: 0;
+        top: 0;
+        z-index: 20;
+        transform-origin: 4px 3px;
+        filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.6));
+      }
+      .shade {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 190px;
+        background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.96) 42%);
+        z-index: 30;
+      }
+      .cap {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 806px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 16px;
+        font-size: 40px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        z-index: 31;
+        opacity: 0;
+      }
+      .cap .n {
+        width: 50px;
+        height: 50px;
+        border-radius: 13px;
+        display: grid;
+        place-items: center;
+        font-family: JB;
+        font-size: 25px;
+        font-weight: 700;
+        background: #191a1d;
+        color: var(--text);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+      }
+      .cap .m {
+        color: var(--muted);
+        font-weight: 560;
+      }
+      .intro {
+        position: absolute;
+        inset: 0;
+        z-index: 50;
+        opacity: 0;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        background:
+          radial-gradient(760px 460px at 50% 42%, rgba(52, 107, 241, 0.14), transparent 70%), #000;
+      }
+      .intro h2 {
+        font-size: 92px;
+        line-height: 1.04;
+        font-weight: 760;
+        letter-spacing: -0.045em;
+      }
+      .intro h2 .and {
+        color: var(--muted);
+      }
+      .outro {
+        position: absolute;
+        inset: 0;
+        z-index: 50;
+        opacity: 0;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        background:
+          radial-gradient(760px 460px at 50% 34%, rgba(52, 107, 241, 0.16), transparent 70%), #000;
+      }
+      .outro .logo {
+        width: 176px;
+        height: 176px;
+        display: block;
+        margin: 0 auto -10px;
+        filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.35))
+          drop-shadow(0 18px 60px rgba(52, 107, 241, 0.35));
+      }
+      .outro h2 {
+        margin-top: 44px;
+        font-size: 76px;
+        line-height: 1.02;
+        font-weight: 760;
+        letter-spacing: -0.045em;
+      }
+      .outro h2 .and {
+        color: var(--muted);
+      }
+      .outro p {
+        margin-top: 22px;
+        font-size: 34px;
+        color: var(--muted);
+        font-weight: 550;
+        letter-spacing: -0.02em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+      }
+      .outro p b {
+        color: var(--text);
+        font-weight: 650;
+      }
+      .ver {
+        font-family: JB;
+        font-size: 22px;
+        font-weight: 600;
+        color: var(--text);
+        padding: 6px 13px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.07);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+      }
+      .outro .url {
+        margin-top: 46px;
+        font-family: JB;
+        font-size: 22px;
+        color: var(--dim);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="canvas">
+      <div class="cam">
+        <div class="win">
+          <div class="app">
+            <iframe data-beat="home" src="beats/home.html"></iframe>
+            <iframe data-beat="ask-typed" src="beats/ask-typed.html"></iframe>
+            <iframe data-beat="starting" src="beats/starting.html"></iframe>
+            <iframe data-beat="proposing" src="beats/proposing.html"></iframe>
+            <iframe data-beat="card" src="beats/card.html"></iframe>
+            <iframe data-beat="dialog" src="beats/dialog.html"></iframe>
+            <iframe data-beat="applied" src="beats/applied.html"></iframe>
+          </div>
+        </div>
+        <div class="cursor" id="cur">
+          <svg viewBox="0 0 24 24" width="26" height="26">
+            <path
+              d="M4 2.5 L4 19.5 L8.6 15.2 L11.6 21.6 L14.6 20.2 L11.7 14 L18 14 Z"
+              fill="#fff"
+              stroke="#000"
+              stroke-width="1.4"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </div>
+      </div>
+      <div class="shade"></div>
+      <div class="cap" id="cap1">
+        <span class="n">1</span><span>Ask for a change <span class="m">to T3 Code itself.</span></span>
+      </div>
+      <div class="cap" id="cap2">
+        <span class="n">2</span><span>It's built and checked <span class="m">before you decide.</span></span>
+      </div>
+      <div class="cap" id="cap3">
+        <span class="n">3</span><span>Apply it <span class="m">and it's live. No fork.</span></span>
+      </div>
+    </div>
+    <div class="intro">
+      <h2>Customize T3 Code<br /><span class="and">without a fork?</span></h2>
+    </div>
+    <div class="outro">
+      <div>
+        <img class="logo" src="logo-prod.png" />
+        <h2>Local mods<br /><span class="and">make T3 Code yours</span></h2>
+        <div class="url">t3.codes</div>
+      </div>
+    </div>
+    <!-- kit.js last: Kit.ready waits for the beat iframes above. -->
+    <script src="kit.js"></script>
+    <script>
+      // Everything here is in animation seconds. capture.mjs calls setup() once the beats have loaded.
+      const CARD = "section[data-v2-item-type=mod_approval_request]";
+      const BRANCHES = "[data-sidebar-row] span.flex-1.gap-1";
+      window.setup = () => {
+        for (const frame of document.querySelectorAll("iframe[data-beat]"))
+          frame.contentDocument.getAnimations().forEach((a) => a.cancel());
+
+        // Intro title
+        Kit.anim(
+          ".intro",
+          [{ opacity: 1 }, { opacity: 1, offset: 0.82 }, { opacity: 0 }],
+          { at: 0, dur: 2.3, ease: "linear" },
+        );
+        Kit.stagger(".intro h2", 0.1, 0.1, "rise", { y: 22 });
+
+        Kit.beats([
+          ["home", 0],
+          ["ask-typed", 3.3],
+          ["starting", 5.8, 0.15],
+          ["proposing", 7.7, 0.15],
+          ["card", 9.5, 0.15],
+          ["dialog", 12.9, 0.15],
+          ["applied", 15.0, 0.35],
+        ]);
+        Kit.anim(
+          ".win",
+          [
+            { opacity: 0, transform: "translateY(40px) scale(.98)" },
+            { opacity: 1, transform: "none" },
+          ],
+          { at: 2.35, dur: 0.75 },
+        );
+
+        // 1. Ask
+        Kit.type("ask-typed >> [data-testid=composer-editor] p", 3.45, 1.9, 81);
+        Kit.press("ask-typed >> [data-chat-composer-form] button[type=submit]", 5.5);
+        Kit.pop("starting >> [data-user-message-bubble]", 5.8, { origin: "right center" });
+        Kit.stagger(
+          "starting >> [data-workspace-area=conversation] [data-timeline-row-id] > *",
+          6.05,
+          0.2,
+          "rise",
+          { y: 14 },
+        );
+        Kit.glow("proposing >> [data-timeline-row-id=live-activity-row] button", 7.9, 1.4);
+
+        // 2. The card
+        Kit.pop(`card >> ${CARD}`, 9.5, { from: 0.85, origin: "center top" });
+        Kit.glow(`card >> ${CARD}`, 10.0, 1.6);
+        Kit.press(`card >> ${CARD} button:text(Apply)`, 12.6);
+
+        // 3. Apply
+        Kit.pop("dialog >> [role=alertdialog]", 12.9, { from: 0.9 });
+        Kit.press("dialog >> [role=alertdialog] button:text(Apply)", 14.6);
+        Kit.stagger(`applied >> ${BRANCHES}`, 15.7, 0.18, "rise", { x: -16, y: 0 });
+        Kit.glow("applied >> [data-sidebar=group] ul", 16.5, 2.0);
+
+        Kit.captions([
+          ["#cap1", 3.3, 9.2],
+          ["#cap2", 9.4, 12.7],
+          ["#cap3", 12.9, 19.8],
+        ]);
+        Kit.anim(".outro", [{ opacity: 0 }, { opacity: 1 }], { at: 20.1, dur: 0.5 });
+        Kit.stagger(".outro .logo, .outro h2, .outro .url", 20.15, 0.08, "rise", {
+          y: 18,
+        });
+      };
+      window.layoutTime = 19.5;
+      window.placeCursor = () =>
+        Kit.measure(() => {
+          Kit.camera([
+            { t: 0, on: "full" },
+            { t: 3.1, on: "full" },
+            {
+              t: 3.55,
+              on: "ask-typed >> [data-chat-composer-form]",
+              s: 1.7,
+              ease: "cubic-bezier(.3,1.2,.4,1)",
+            },
+            { t: 5.6, on: "ask-typed >> [data-chat-composer-form]", s: 1.7 },
+            { t: 6.2, on: "starting >> [data-timeline-row-id=live-activity-row]", s: 1.6, dy: -40 },
+            { t: 9.2, on: "proposing >> [data-timeline-row-id=live-activity-row]", s: 1.6, dy: -40 },
+            { t: 9.9, on: `card >> ${CARD}`, s: 1.6 },
+            { t: 12.5, on: `card >> ${CARD}`, s: 1.6 },
+            { t: 13.2, on: "dialog >> [role=alertdialog]", s: 1.7 },
+            { t: 14.8, on: "dialog >> [role=alertdialog]", s: 1.7 },
+            { t: 15.1, on: "full" },
+            {
+              t: 15.6,
+              on: "applied >> [data-sidebar=group] ul",
+              dx: 150,
+              dy: -110,
+              s: 1.8,
+              ease: "cubic-bezier(.2,.8,.2,1)",
+            },
+            { t: 20.1, on: "applied >> [data-sidebar=group] ul", dx: 150, dy: -110, s: 1.8 },
+          ]);
+          Kit.cursor("#cur", [
+            { t: 11.2, at: `card >> ${CARD} button:text(Apply)`, dx: 120, dy: 90, hidden: true },
+            { t: 11.4 },
+            { t: 12.3, at: `card >> ${CARD} button:text(Apply)`, dx: 4 },
+            { t: 12.6, at: `card >> ${CARD} button:text(Apply)`, click: true },
+            { t: 12.9, hidden: true },
+            { t: 13.4, at: "dialog >> [role=alertdialog] button:text(Apply)", dx: 90, dy: 70, hidden: true },
+            { t: 13.6 },
+            { t: 14.3, at: "dialog >> [role=alertdialog] button:text(Apply)", dx: 6 },
+            { t: 14.6, at: "dialog >> [role=alertdialog] button:text(Apply)", click: true },
+            { t: 15.0 },
+            { t: 15.2, hidden: true },
+            { t: 21, hidden: true },
+          ]);
+        });
+      Kit.timeline([
+        [20.1, 0, 20.1],
+        [0.7, 20.1, 20.8],
+        [2.8, 20.8, 20.8],
+      ]);
+    </script>
+  </body>
+</html>

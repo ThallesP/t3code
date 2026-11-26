@@ -24,7 +24,8 @@ import type { RestartingMachine, UpdateEverythingRow } from "./updateEverything.
 const isRunning = (status: string) =>
   status === "preparing" || status === "starting" || status === "running";
 
-const runningThreadCountAtom = Atom.family((environmentIds: string) =>
+/** How many threads run on the machines named by newline-joined ids. */
+export const runningThreadCountAtom = Atom.family((environmentIds: string) =>
   Atom.make((get) =>
     environmentIds
       .split("\n")
@@ -109,23 +110,6 @@ function UpdateEverythingDialogContent({
 }: UpdateEverythingDialogContentProps) {
   const gt = useGT();
   const m = useMessages();
-  const stopped = useAtomValue(
-    runningThreadCountAtom(
-      restarts
-        .filter((machine) => !machine.continuesThreads)
-        .map((machine) => machine.environmentId)
-        .join("\n"),
-    ),
-  );
-  const continuing = useAtomValue(
-    runningThreadCountAtom(
-      restarts
-        .filter((machine) => machine.continuesThreads)
-        .map((machine) => machine.environmentId)
-        .join("\n"),
-    ),
-  );
-  const running = stopped + continuing;
   const restarting = new Set(restarts.map((machine) => machine.environmentId));
   const updating = rows.filter((row) => row.app !== null || row.providers.length > 0);
   const skipped = rows.filter((row) => row.skipped !== null);
@@ -250,27 +234,9 @@ function UpdateEverythingDialogContent({
           <p className="self-center text-sm max-sm:order-1 max-sm:text-center sm:mr-auto">
             {disabledReason}
           </p>
-        ) : running > 0 ? (
-          <p className="self-center text-muted-foreground text-sm max-sm:order-1 max-sm:text-center sm:mr-auto">
-            {stopped === 0
-              ? gt(
-                  "{count, plural, one {{count} running thread will be interrupted and can resume after the restart.} other {{count} running threads will be interrupted and can resume after the restart.}}",
-                  { count: running },
-                )
-              : continuing === 0
-                ? gt(
-                    "{count, plural, one {{count} running thread will be interrupted.} other {{count} running threads will be interrupted.}}",
-                    { count: running },
-                  )
-                : `${gt(
-                    "{count, plural, one {{count} running thread will be interrupted.} other {{count} running threads will be interrupted.}}",
-                    { count: running },
-                  )} ${gt(
-                    "{count, plural, one {{count} can resume after the restart.} other {{count} can resume after the restart.}}",
-                    { count: continuing },
-                  )}`}
-          </p>
-        ) : null}
+        ) : (
+          <RestartInterruptionNote restarts={restarts} />
+        )}
         <AlertDialogClose ref={cancelRef} render={<Button variant="outline" disabled={busy} />}>
           <T>Cancel</T>
         </AlertDialogClose>
@@ -282,7 +248,55 @@ function UpdateEverythingDialogContent({
   );
 }
 
-function RunningThreads({ environmentId }: { readonly environmentId: EnvironmentId }) {
+/** How many running threads the restarts interrupt, and whether they resume. Nothing when none. */
+export function RestartInterruptionNote({
+  restarts,
+}: {
+  readonly restarts: ReadonlyArray<RestartingMachine>;
+}) {
+  const gt = useGT();
+  const stopped = useAtomValue(
+    runningThreadCountAtom(
+      restarts
+        .filter((machine) => !machine.continuesThreads)
+        .map((machine) => machine.environmentId)
+        .join("\n"),
+    ),
+  );
+  const continuing = useAtomValue(
+    runningThreadCountAtom(
+      restarts
+        .filter((machine) => machine.continuesThreads)
+        .map((machine) => machine.environmentId)
+        .join("\n"),
+    ),
+  );
+  const running = stopped + continuing;
+  if (running === 0) return null;
+  return (
+    <p className="self-center text-muted-foreground text-sm max-sm:order-1 max-sm:text-center sm:mr-auto">
+      {stopped === 0
+        ? gt(
+            "{count, plural, one {{count} running thread will be interrupted and can resume after the restart.} other {{count} running threads will be interrupted and can resume after the restart.}}",
+            { count: running },
+          )
+        : continuing === 0
+          ? gt(
+              "{count, plural, one {{count} running thread will be interrupted.} other {{count} running threads will be interrupted.}}",
+              { count: running },
+            )
+          : `${gt(
+              "{count, plural, one {{count} running thread will be interrupted.} other {{count} running threads will be interrupted.}}",
+              { count: running },
+            )} ${gt(
+              "{count, plural, one {{count} can resume after the restart.} other {{count} can resume after the restart.}}",
+              { count: continuing },
+            )}`}
+    </p>
+  );
+}
+
+export function RunningThreads({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const count = useAtomValue(runningThreadCountAtom(environmentId));
   const gt = useGT();
   return count > 0 ? (

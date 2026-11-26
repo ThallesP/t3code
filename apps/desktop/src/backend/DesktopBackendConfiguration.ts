@@ -11,10 +11,8 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   markRuntimeOverrideTrialStarted,
   resolveActiveRuntimeOverride,
-  RUNTIME_OVERRIDE_ENV_ACTIVE,
   RUNTIME_OVERRIDE_ENV_ENABLE_DEV,
-  RUNTIME_OVERRIDE_ENV_ENTRY,
-  RUNTIME_OVERRIDE_ENV_STATIC_DIR,
+  runtimeOverrideEnv,
 } from "@t3tools/shared/runtimeOverride";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -564,8 +562,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         })
       : ({ status: "stock", reason: "none" } as const);
 
+    // A client-only build has no server of its own; the app reads its folder on each page load.
     const activeOverride =
-      overrideResolution.status === "override" ? overrideResolution.override : null;
+      overrideResolution.status === "override" &&
+      overrideResolution.override.entryPath !== undefined
+        ? overrideResolution.override
+        : null;
     if (activeOverride !== null) {
       markRuntimeOverrideTrialStarted(environment.stateDir);
       yield* Ref.set(
@@ -622,13 +624,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1",
         T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
         [DESKTOP_HOST_SCOPE_ENV]: input.hostScope,
-        ...(activeOverride !== null
-          ? {
-              [RUNTIME_OVERRIDE_ENV_ACTIVE]: "1",
-              [RUNTIME_OVERRIDE_ENV_ENTRY]: activeOverride.entryPath,
-              [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: activeOverride.clientAssetsDir,
-            }
-          : {}),
+        ...(activeOverride !== null ? runtimeOverrideEnv(activeOverride) : {}),
       },
       extendEnv: true,
       bootstrap,

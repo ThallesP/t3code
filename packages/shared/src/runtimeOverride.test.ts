@@ -7,16 +7,22 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 
 import {
   checkPatchGuardrails,
+  claimedRuntimeOverride,
+  claimRuntimeOverride,
   computeRuntimeOverrideArtifactSha256,
   computeTextSha256,
   failRuntimeOverrideStartup,
+  isServerStartInvocation,
   isStockModeRequested,
   isValidModId,
   markRuntimeOverrideHealthy,
   markRuntimeOverrideTrialStarted,
+  readLiveClientAssetsDir,
   readRuntimeOverrideFallback,
   readRuntimeOverridePointer,
+  releaseRuntimeOverride,
   resolveActiveRuntimeOverride,
+  runtimeOverrideEnv,
   writeRuntimeOverridePointer,
   type RuntimeOverridePointer,
 } from "./runtimeOverride.ts";
@@ -89,6 +95,77 @@ describe("runtimeOverride", () => {
     const healthy = readRuntimeOverridePointer(stateDir);
     expect(healthy?.pendingTrial).toBe(false);
     expect(healthy?.trialPassedAt).toBe("2026-11-24T18:01:05.000Z");
+  });
+
+  it("starts a build's trial only on a server start, never on a launcher's probe", () => {
+    for (const argv of [
+      [],
+      ["serve", "--host", "127.0.0.1", "--port", "3773", "--base-dir", "/home/me/.t3"],
+      ["--port", "3773"],
+      ["start"],
+    ]) {
+      expect(isServerStartInvocation(argv), argv.join(" ")).toBe(true);
+    }
+    for (const argv of [
+      ["--version"],
+      ["--help"],
+      ["serve", "--help"],
+      ["__ssh-helper", "pick-port"],
+      ["mod", "status"],
+      ["--base-dir", "/home/me/.t3", "auth", "pairing", "create"],
+    ]) {
+      expect(isServerStartInvocation(argv), argv.join(" ")).toBe(false);
+    }
+  });
+
+  it("serves a client-only build at once and leaves a server build to its restart", () => {
+    const stateDir = makeTempBaseDir();
+    const build = writeFakeBuild(stateDir);
+    const live = () => readLiveClientAssetsDir({ stateDir, currentVersion: "0.1.11" });
+
+    writeRuntimeOverridePointer(stateDir, makePointer(build));
+    expect(live()).toBeNull();
+
+    const { entryPath: _entry, pendingTrial: _trial, ...withServer } = makePointer(build);
+    const clientOnly = {
+      ...withServer,
+      artifactSha256: computeRuntimeOverrideArtifactSha256(undefined, build.clientAssetsDir)!,
+    };
+    writeRuntimeOverridePointer(stateDir, clientOnly);
+    expect(live()).toBe(build.clientAssetsDir);
+    expect(runtimeOverrideEnv(clientOnly)).toEqual({});
+    // A client-only build has no start to fail, so a restart never falls back from it.
+    expect(resolveActiveRuntimeOverride({ stateDir, currentVersion: "0.1.11" }).status).toBe(
+      "override",
+    );
+    expect(
+      readLiveClientAssetsDir({ stateDir, currentVersion: "0.1.11", argv: ["--stock"] }),
+    ).toBeNull();
+    expect(readLiveClientAssetsDir({ stateDir, currentVersion: "0.1.12" })).toBeNull();
+  });
+
+  it("takes a launcher's build once and leaves nothing for the server's children to inherit", () => {
+    const env: NodeJS.ProcessEnv = {
+      ...runtimeOverrideEnv({
+        entryPath: "/builds/a/bin.mjs",
+        clientAssetsDir: "/builds/a/client",
+      }),
+      PATH: "/usr/bin",
+    };
+
+    expect(claimRuntimeOverride(env, "/opt/t3")).toEqual({
+      entryPath: "/builds/a/bin.mjs",
+      clientAssetsDir: "/builds/a/client",
+      stockDir: "/opt/t3",
+    });
+    // An agent's shell gets this environment: a `t3` started there must run its own code.
+    expect(env).toEqual({ PATH: "/usr/bin" });
+    expect(claimedRuntimeOverride()?.entryPath).toBe("/builds/a/bin.mjs");
+    expect(claimRuntimeOverride(env, "/opt/t3")?.entryPath).toBe("/builds/a/bin.mjs");
+
+    releaseRuntimeOverride();
+    expect(claimedRuntimeOverride()).toBeNull();
+    expect(claimRuntimeOverride({ PATH: "/usr/bin" }, "/opt/t3")).toBeNull();
   });
 
   it("falls back to stock when a previous trial crashed before becoming healthy", () => {

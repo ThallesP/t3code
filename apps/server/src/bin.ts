@@ -6,13 +6,15 @@ import * as NodeSea from "node:sea";
 import * as NodeURL from "node:url";
 
 import {
+  claimRuntimeOverride,
   failRuntimeOverrideStartup,
   installedStateDir,
+  isServerStartInvocation,
   markRuntimeOverrideTrialStarted,
+  releaseRuntimeOverride,
   resolveActiveRuntimeOverride,
+  runtimeOverrideEnv,
   RUNTIME_OVERRIDE_ENV_ACTIVE,
-  RUNTIME_OVERRIDE_ENV_ENTRY,
-  RUNTIME_OVERRIDE_ENV_STATIC_DIR,
 } from "@t3tools/shared/runtimeOverride";
 
 import packageJson from "../package.json" with { type: "json" };
@@ -42,22 +44,11 @@ function isDevServerInvocation(argv: ReadonlyArray<string>, env: NodeJS.ProcessE
   );
 }
 
-function isServerStartInvocation(argv: ReadonlyArray<string>): boolean {
-  const first = argv.find((arg) => !arg.startsWith("-"));
-  return first === undefined || first === "serve" || first === "start";
-}
-
 // Loads the CLI outside the launcher's module graph. Packaged builds embed it as a raw asset.
 async function loadCliMain(): Promise<typeof import("./binMain.ts")> {
   const argv = process.argv.slice(2);
   const stateDir = resolveForegroundStateDir(argv, process.env);
-  let overrideEntry =
-    process.env[RUNTIME_OVERRIDE_ENV_ACTIVE] === "1"
-      ? process.env[RUNTIME_OVERRIDE_ENV_ENTRY]?.trim()
-      : undefined;
-
   if (
-    !overrideEntry &&
     process.env[RUNTIME_OVERRIDE_ENV_ACTIVE] !== "1" &&
     isServerStartInvocation(argv) &&
     !isDevServerInvocation(argv, process.env)
@@ -68,14 +59,16 @@ async function loadCliMain(): Promise<typeof import("./binMain.ts")> {
       env: process.env,
       argv,
     });
-    if (resolved.status === "override") {
+    // A client-only build has no server to load: the stock server reads its folder per request.
+    if (resolved.status === "override" && resolved.override.entryPath !== undefined) {
       markRuntimeOverrideTrialStarted(stateDir);
-      process.env[RUNTIME_OVERRIDE_ENV_ACTIVE] = "1";
-      process.env[RUNTIME_OVERRIDE_ENV_ENTRY] = resolved.override.entryPath;
-      process.env[RUNTIME_OVERRIDE_ENV_STATIC_DIR] = resolved.override.clientAssetsDir;
-      overrideEntry = resolved.override.entryPath;
+      Object.assign(process.env, runtimeOverrideEnv(resolved.override));
     }
   }
+  const overrideEntry = claimRuntimeOverride(
+    process.env,
+    NodeSea.isSea() ? NodePath.dirname(process.execPath) : import.meta.dirname,
+  )?.entryPath;
 
   if (overrideEntry) {
     // A single executable can only import() built-ins, but its require() loads files from disk.
@@ -93,9 +86,7 @@ async function loadCliMain(): Promise<typeof import("./binMain.ts")> {
       currentVersion: packageJson.version,
       message: "Custom build has no CLI entry point; fell back to stock T3 Code.",
     });
-    delete process.env[RUNTIME_OVERRIDE_ENV_ACTIVE];
-    delete process.env[RUNTIME_OVERRIDE_ENV_ENTRY];
-    delete process.env[RUNTIME_OVERRIDE_ENV_STATIC_DIR];
+    releaseRuntimeOverride();
   }
 
   if (!NodeSea.isSea()) return import("./binMain.ts");

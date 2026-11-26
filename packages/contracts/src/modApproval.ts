@@ -24,6 +24,8 @@ export const ModApprovalPreview = Schema.Struct({
   diffTruncated: Schema.Boolean,
   warnings: Schema.Array(Schema.String),
   verification: ModApprovalVerification,
+  /** False when only the web client changes, so applying needs a page reload and nothing else. */
+  restartRequired: Schema.optionalKey(Schema.Boolean),
 });
 export type ModApprovalPreview = typeof ModApprovalPreview.Type;
 
@@ -44,11 +46,18 @@ export const ModApprovalAnswerInput = Schema.Struct({
 });
 export type ModApprovalAnswerInput = typeof ModApprovalAnswerInput.Type;
 
+/**
+ * What an applied build still needs before it shows: a page reload (`live`), or a restart of
+ * T3 Code on that machine (`restart_required`), which the user starts.
+ */
+export const ModApprovalActivation = Schema.Literals(["live", "restart_required"]);
+export type ModApprovalActivation = typeof ModApprovalActivation.Type;
+
 export const ModApprovalAnswerResult = Schema.Struct({
   status: ModApprovalRequestStatus,
   /** Signs the opener in to the preview once, so it goes to the asking client and is never stored. */
   previewUrl: Schema.optionalKey(Schema.String),
-  restartRequired: Schema.optionalKey(Schema.Boolean),
+  activation: Schema.optionalKey(ModApprovalActivation),
 });
 export type ModApprovalAnswerResult = typeof ModApprovalAnswerResult.Type;
 

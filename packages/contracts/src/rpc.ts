@@ -461,6 +461,14 @@ import {
   ModApprovalRequestError,
 } from "./modApproval.ts";
 import {
+  ModsOfferBuildInput,
+  ModsOfferBuildResult,
+  ModsPackBuildInput,
+  ModsPackBuildResult,
+  ModsRequestError,
+  ModsStatusResult,
+} from "./mods.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -657,6 +665,10 @@ export const WS_METHODS = {
   secretsAnswerRequest: "secrets.answerRequest",
   agentFeedbackAnswerRequest: "agentFeedback.answerRequest",
   modApprovalAnswerRequest: "modApproval.answerRequest",
+  modsStatus: "mods.status",
+  modsOfferBuild: "mods.offerBuild",
+  modsPackBuild: "mods.packBuild",
+  modsRestart: "mods.restart",
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
@@ -2433,6 +2445,29 @@ const WsModApprovalAnswerRequestRpc = Rpc.make(WS_METHODS.modApprovalAnswerReque
   error: Schema.Union([ModApprovalRequestError, EnvironmentAuthorizationError]),
 });
 
+const WsModsStatusRpc = Rpc.make(WS_METHODS.modsStatus, {
+  payload: Schema.Struct({}),
+  success: ModsStatusResult,
+  error: Schema.Union([ModsRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsModsOfferBuildRpc = Rpc.make(WS_METHODS.modsOfferBuild, {
+  payload: ModsOfferBuildInput,
+  success: ModsOfferBuildResult,
+  error: Schema.Union([ModsRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsModsPackBuildRpc = Rpc.make(WS_METHODS.modsPackBuild, {
+  payload: ModsPackBuildInput,
+  success: ModsPackBuildResult,
+  error: Schema.Union([ModsRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsModsRestartRpc = Rpc.make(WS_METHODS.modsRestart, {
+  payload: Schema.Struct({}),
+  error: Schema.Union([ModsRequestError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
   {
@@ -2570,6 +2605,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsAgentFeedbackAnswerRequestRpc,
   WsModApprovalAnswerRequestRpc,
+  WsModsStatusRpc,
+  WsModsOfferBuildRpc,
+  WsModsPackBuildRpc,
+  WsModsRestartRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,

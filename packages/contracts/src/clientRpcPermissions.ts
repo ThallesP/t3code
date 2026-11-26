@@ -104,6 +104,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   // Send stores and sends a report from a thread's turn: the bar of running that thread.
   [WS_METHODS.agentFeedbackAnswerRequest]: AuthOrchestrationOperateScope,
   [WS_METHODS.modApprovalAnswerRequest]: AuthOrchestrationOperateScope,
+  // Taking a build runs its code on that machine, and a restart interrupts its threads.
+  [WS_METHODS.modsOfferBuild]: AuthOrchestrationOperateScope,
+  [WS_METHODS.modsPackBuild]: AuthOrchestrationOperateScope,
+  [WS_METHODS.modsRestart]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

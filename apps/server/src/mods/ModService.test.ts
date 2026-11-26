@@ -2,7 +2,13 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as NetService from "@t3tools/shared/Net";
-import { modsPaths, readRuntimeOverridePointer } from "@t3tools/shared/runtimeOverride";
+import {
+  modsPaths,
+  readLiveClientAssetsDir,
+  readRuntimeOverridePointer,
+  resolveActiveRuntimeOverride,
+  writeRuntimeOverridePointer,
+} from "@t3tools/shared/runtimeOverride";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -37,7 +43,12 @@ const initTestRepo = Effect.fn("test.initTestRepo")(function* () {
     path.join(repoDir, "feature.ts"),
     "export const keepScheduledSettled = false;\n",
   );
-  yield* runGit(repoDir, ["add", "feature.ts"]);
+  yield* fs.makeDirectory(path.join(repoDir, "apps", "web"), { recursive: true });
+  yield* fs.writeFileString(
+    path.join(repoDir, "apps", "web", "banner.ts"),
+    'export const banner = "stock";\n',
+  );
+  yield* runGit(repoDir, ["add", "feature.ts", "apps"]);
   yield* runGit(repoDir, ["commit", "-m", "stock"]);
   return repoDir;
 });
@@ -52,13 +63,20 @@ const VERIFY_KEEP_SETTLED = [
 // Bundles by concatenating the checkout's sources, so a test can read what was built.
 const fakeBuilder: ModService.ModBuilder = {
   install: () => Effect.void,
-  bundle: ({ worktreeDir, buildDir }) =>
+  bundle: ({ worktreeDir, buildDir, clientOnly }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const entryPath = path.join(buildDir, "dist", "bin.mjs");
       const clientAssetsDir = path.join(buildDir, "dist", "client");
       yield* fs.makeDirectory(clientAssetsDir, { recursive: true });
+      if (clientOnly) {
+        yield* fs.writeFileString(
+          path.join(clientAssetsDir, "index.html"),
+          yield* fs.readFileString(path.join(worktreeDir, "apps", "web", "banner.ts")),
+        );
+        return { clientAssetsDir };
+      }
       const sources = (yield* fs.readDirectory(worktreeDir))
         .filter((entry) => entry.endsWith(".ts"))
         .toSorted();
@@ -164,6 +182,120 @@ describe("ModService", () => {
     ),
   );
 
+  it.live(
+    "applies a change to the web client alone with no restart, and turns it off the same way",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const repoDir = yield* initTestRepo();
+          const modService = yield* ModService.ModService;
+          const config = yield* ServerConfig.ServerConfig;
+
+          const workspace = yield* modService.startWorkspace({
+            id: "new-banner",
+            sourceDir: repoDir,
+            builder: fakeBuilder,
+          });
+          yield* fs.writeFileString(
+            path.join(workspace.workspaceDir, "apps", "web", "banner.ts"),
+            'export const banner = "custom";\n',
+          );
+          const preview = yield* modService.prepareCandidate({
+            id: "new-banner",
+            title: "A new banner",
+            intent: "The banner reads custom.",
+            verifySource:
+              'import { banner } from "./apps/web/banner.ts";\nif (banner !== "custom") process.exit(1);\n',
+            sourceDir: repoDir,
+            builder: fakeBuilder,
+          });
+          assert.isTrue(preview.verification.stockFailed);
+          assert.isFalse(preview.restartRequired);
+
+          const activated = yield* modService.activateBuild({
+            buildId: preview.buildId,
+            expectedArtifactSha256: preview.artifactSha256,
+          });
+          assert.isFalse(activated.restartRequired);
+          const pointer = readRuntimeOverridePointer(config.stateDir);
+          assert.isUndefined(pointer?.entryPath);
+          // No server of its own, so no start that could fail.
+          assert.isUndefined(pointer?.pendingTrial);
+
+          const served = () =>
+            readLiveClientAssetsDir({
+              stateDir: config.stateDir,
+              currentVersion: preview.baseVersion,
+            });
+          const liveDir = served();
+          assert.equal(liveDir, pointer?.clientAssetsDir);
+          assert.include(
+            yield* fs.readFileString(path.join(liveDir ?? "", "index.html")),
+            '"custom"',
+          );
+
+          assert.isFalse((yield* modService.disableAll()).restartRequired);
+          assert.isNull(served());
+        }).pipe(Effect.provide(makeLayer("/tmp"))),
+      ),
+  );
+
+  it.live("builds a mod that changes the same lines as an earlier one on top of it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const repoDir = yield* initTestRepo();
+        const modService = yield* ModService.ModService;
+
+        const first = yield* proposeKeepSettled(repoDir);
+        yield* modService.activateBuild({
+          buildId: first.preview.buildId,
+          expectedArtifactSha256: first.preview.artifactSha256,
+        });
+
+        const second = yield* modService.startWorkspace({
+          id: "always-settled",
+          sourceDir: repoDir,
+          builder: fakeBuilder,
+        });
+        assert.deepEqual(
+          second.builtOn.map((mod) => mod.id),
+          [first.preview.modId],
+        );
+        yield* fs.writeFileString(
+          path.join(second.workspaceDir, "feature.ts"),
+          'export const keepScheduledSettled = "always";\n',
+        );
+        const preview = yield* modService.prepareCandidate({
+          id: "always-settled",
+          title: "Always keep scheduled threads settled",
+          intent: "Scheduled threads stay settled, whatever their run did.",
+          verifySource:
+            'import { keepScheduledSettled } from "./feature.ts";\nif (keepScheduledSettled !== "always") process.exit(1);\n',
+          sourceDir: repoDir,
+          builder: fakeBuilder,
+        });
+
+        assert.isTrue(preview.verification.stockFailed);
+        assert.include(preview.diffPreview, "-export const keepScheduledSettled = true;");
+        assert.equal(
+          yield* fs.readFileString(
+            path.join(
+              modsPaths((yield* ServerConfig.ServerConfig).stateDir).buildsDir,
+              preview.buildId,
+              "dist",
+              "bin.mjs",
+            ),
+          ),
+          'export const keepScheduledSettled = "always";\n',
+        );
+      }).pipe(Effect.provide(makeLayer("/tmp"))),
+    ),
+  );
+
   it.live("keeps applied mods in the next mod's build and refuses a build they outdated", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -183,10 +315,11 @@ describe("ModService", () => {
           sourceDir: repoDir,
           builder: fakeBuilder,
         });
-        // A workspace starts from stock, so its diff is this mod alone.
+        // A workspace is T3 Code as the user has it, so a change beside an earlier mod is
+        // written against it. The diff is still this mod alone.
         assert.equal(
           yield* fs.readFileString(path.join(second.workspaceDir, "feature.ts")),
-          "export const keepScheduledSettled = false;\n",
+          "export const keepScheduledSettled = true;\n",
         );
         yield* fs.writeFileString(
           path.join(second.workspaceDir, "wake.ts"),
@@ -243,7 +376,7 @@ describe("ModService", () => {
         // The update rewrites the line the saved mod changes.
         yield* fs.writeFileString(
           path.join(repoDir, "feature.ts"),
-          "export const keepScheduledSettled = \"never\";\n",
+          'export const keepScheduledSettled = "never";\n',
         );
         yield* runGit(repoDir, ["commit", "-am", "upstream rewrite"]);
 
@@ -369,6 +502,90 @@ describe("ModService", () => {
     ),
   );
 
+  it.live(
+    "after an update, rebuilds the mods that still fit and turns off the one that does not",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const repoDir = yield* initTestRepo();
+          const modService = yield* ModService.ModService;
+          const { stateDir } = yield* ServerConfig.ServerConfig;
+
+          const first = yield* proposeKeepSettled(repoDir);
+          yield* modService.activateBuild({
+            buildId: first.preview.buildId,
+            expectedArtifactSha256: first.preview.artifactSha256,
+          });
+          const workspace = yield* modService.startWorkspace({
+            id: "wake-on-pr",
+            sourceDir: repoDir,
+            builder: fakeBuilder,
+          });
+          yield* fs.writeFileString(
+            path.join(workspace.workspaceDir, "wake.ts"),
+            "export const wakeOnPullRequest = true;\n",
+          );
+          const second = yield* modService.prepareCandidate({
+            id: "wake-on-pr",
+            title: "Wake a thread when its pull request is ready",
+            intent: "Wake the thread once its pull request is approved and green.",
+            verifySource:
+              'import { wakeOnPullRequest } from "./wake.ts";\nif (!wakeOnPullRequest) process.exit(1);\n',
+            sourceDir: repoDir,
+            builder: fakeBuilder,
+          });
+          yield* modService.activateBuild({
+            buildId: second.buildId,
+            expectedArtifactSha256: second.artifactSha256,
+          });
+
+          // The update rewrites the line the first mod changes, and the new version starts.
+          yield* fs.writeFileString(
+            path.join(repoDir, "feature.ts"),
+            'export const keepScheduledSettled = "never";\n',
+          );
+          yield* runGit(repoDir, ["commit", "-am", "upstream rewrite"]);
+          const applied = readRuntimeOverridePointer(stateDir)!;
+          writeRuntimeOverridePointer(stateDir, { ...applied, baseVersion: "0.0.1" });
+          resolveActiveRuntimeOverride({ stateDir, currentVersion: applied.baseVersion });
+
+          const paused = yield* modService.status();
+          assert.isNull(paused.activeOverride);
+          assert.deepEqual(
+            paused.paused.map((mod) => mod.metadata.id),
+            [MOD_ID, "wake-on-pr"],
+          );
+
+          yield* modService.rebuildAfterUpdate({ sourceDir: repoDir, builder: fakeBuilder });
+
+          const rebuilt = yield* modService.status();
+          assert.deepEqual(
+            rebuilt.activeOverride?.mods.map((mod) => mod.id),
+            ["wake-on-pr"],
+          );
+          assert.isNull(rebuilt.fallback);
+          assert.lengthOf(rebuilt.paused, 0);
+          assert.deepEqual(
+            rebuilt.mods.map((mod) => [
+              mod.metadata.id,
+              mod.metadata.enabled,
+              mod.metadata.needsRepair === true,
+            ]),
+            [
+              [MOD_ID, false, true],
+              ["wake-on-pr", true, false],
+            ],
+          );
+          assert.equal(
+            yield* fs.readFileString(rebuilt.activeOverride!.entryPath!),
+            'export const keepScheduledSettled = "never";\nexport const wakeOnPullRequest = true;\n',
+          );
+        }).pipe(Effect.provide(makeLayer("/tmp"))),
+      ),
+  );
+
   it.live("detects ready, already_fixed_upstream, and verify_tampered during upgrade check", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -421,6 +638,74 @@ describe("ModService", () => {
         assert.isFalse(imported.verifyTampered);
         assert.isFalse(imported.metadata.enabled);
       }).pipe(Effect.provide(makeLayer("/tmp"))),
+    ),
+  );
+
+  it.live("runs a build made on one machine on another, with its mods and nothing rebuilt", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const packPath = path.join(
+          yield* fs.makeTempDirectoryScoped({ prefix: "t3-mod-pack-" }),
+          "build.pack",
+        );
+        // Two machines: each layer has its own T3 home.
+        const origin = yield* Layer.build(makeLayer("/tmp"));
+        const other = yield* Layer.build(makeLayer("/tmp"));
+
+        const built = yield* Effect.gen(function* () {
+          const modService = yield* ModService.ModService;
+          const { preview } = yield* proposeKeepSettled(yield* initTestRepo());
+          yield* modService.activateBuild({
+            buildId: preview.buildId,
+            expectedArtifactSha256: preview.artifactSha256,
+          });
+          return yield* modService.describeBuild({ buildId: preview.buildId });
+        }).pipe(Effect.provide(origin));
+        assert.isTrue(built.restartRequired);
+        assert.deepEqual(built.clientFiles, ["index.html"]);
+
+        // The other machine says which interface files it lacks, and is sent only those.
+        const missing = yield* Effect.gen(function* () {
+          const modService = yield* ModService.ModService;
+          return yield* modService.missingClientFiles(built.clientFiles);
+        }).pipe(Effect.provide(other));
+        assert.deepEqual(missing, ["index.html"]);
+        yield* Effect.gen(function* () {
+          const modService = yield* ModService.ModService;
+          yield* modService.packBuild({ buildId: built.buildId, clientFiles: missing, packPath });
+        }).pipe(Effect.provide(origin));
+
+        yield* Effect.gen(function* () {
+          const modService = yield* ModService.ModService;
+          const config = yield* ServerConfig.ServerConfig;
+          const installed = yield* modService.installBuild({ packPath });
+          assert.deepEqual(installed, { buildId: built.buildId, restartRequired: true });
+
+          const pointer = readRuntimeOverridePointer(config.stateDir);
+          assert.equal(pointer?.buildId, built.buildId);
+          assert.equal(pointer?.artifactSha256, built.artifactSha256);
+          assert.isTrue(pointer?.pendingTrial);
+          // The files are this machine's own copy, not a path on the first one.
+          assert.isTrue(pointer?.entryPath?.startsWith(config.stateDir));
+          assert.include(
+            yield* fs.readFileString(pointer?.entryPath ?? ""),
+            "export const keepScheduledSettled = true;",
+          );
+          // The mod came along, so this machine lists it and can rebuild it after an update.
+          const mods = yield* modService.listMods();
+          assert.deepEqual(
+            mods.map((mod) => [mod.metadata.id, mod.metadata.enabled]),
+            [[MOD_ID, true]],
+          );
+
+          yield* fs.writeFileString(packPath, "not a pack");
+          const damaged = yield* modService.installBuild({ packPath }).pipe(Effect.flip);
+          assert.equal(damaged.stage, "activate");
+          assert.equal(readRuntimeOverridePointer(config.stateDir)?.buildId, built.buildId);
+        }).pipe(Effect.provide(other));
+      }).pipe(Effect.provide(NodeServices.layer)),
     ),
   );
 });

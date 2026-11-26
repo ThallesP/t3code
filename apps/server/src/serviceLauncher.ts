@@ -15,9 +15,7 @@ import {
   installedStateDir,
   markRuntimeOverrideTrialStarted,
   resolveActiveRuntimeOverride,
-  RUNTIME_OVERRIDE_ENV_ACTIVE,
-  RUNTIME_OVERRIDE_ENV_ENTRY,
-  RUNTIME_OVERRIDE_ENV_STATIC_DIR,
+  runtimeOverrideEnv,
 } from "@t3tools/shared/runtimeOverride";
 import { isNoCopyOnWrite, markNoCopyOnWrite } from "./noCopyOnWrite.ts";
 
@@ -1246,7 +1244,10 @@ export class Launcher {
           })
         : ({ status: "stock", reason: "none" } as const);
     const activeOverride =
-      overrideResolution.status === "override" ? overrideResolution.override : undefined;
+      overrideResolution.status === "override" &&
+      overrideResolution.override.entryPath !== undefined
+        ? overrideResolution.override
+        : undefined;
     if (activeOverride !== undefined) {
       markRuntimeOverrideTrialStarted(installedStateDir(this.#baseDir));
     }
@@ -1257,13 +1258,7 @@ export class Launcher {
       env: {
         ...this.#environment,
         [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context),
-        ...(activeOverride !== undefined
-          ? {
-              [RUNTIME_OVERRIDE_ENV_ACTIVE]: "1",
-              [RUNTIME_OVERRIDE_ENV_ENTRY]: activeOverride.entryPath,
-              [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: activeOverride.clientAssetsDir,
-            }
-          : {}),
+        ...(activeOverride !== undefined ? runtimeOverrideEnv(activeOverride) : {}),
       },
       stdio:
         this.#output === undefined

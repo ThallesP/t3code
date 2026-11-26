@@ -30,7 +30,7 @@ export function modApprovalDisplay(
       return {
         kind: "answered",
         outcome: "applied",
-        label: resolve(msg("Applied (restart to activate)")),
+        label: resolve(msg("Applied")),
       };
     case "declined":
       return { kind: "answered", outcome: "not-applied", label: resolve(msg("Declined")) };
@@ -41,10 +41,6 @@ export function modApprovalDisplay(
         label: resolve(msg("Closed without applying")),
       };
   }
-}
-
-export function shortArtifactDigest(sha256: string): string {
-  return sha256.slice(0, 12);
 }
 
 export function modApprovalFailureMessage(

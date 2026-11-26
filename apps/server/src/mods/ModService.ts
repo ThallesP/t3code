@@ -11,14 +11,16 @@ import {
   clearRuntimeOverridePointer,
   computeRuntimeOverrideArtifactSha256,
   computeTextSha256,
+  isClientOnlyChange,
   isValidModId,
   modsPaths,
   readRuntimeOverrideFallback,
   readRuntimeOverridePointer,
-  RUNTIME_OVERRIDE_ENV_ACTIVE,
-  RUNTIME_OVERRIDE_ENV_ENTRY,
+  claimedRuntimeOverride,
   RUNTIME_OVERRIDE_ENV_STATIC_DIR,
+  runtimeOverrideEnv,
   type RuntimeOverrideFallbackRecord,
+  type RuntimeOverrideModSummary,
   type RuntimeOverridePointer,
   type SavedModMetadata,
   writeRuntimeOverridePointer,
@@ -47,7 +49,20 @@ import packageJson from "../../package.json" with { type: "json" };
 import { resolveEntryPath } from "../cli/invocation.ts";
 import { hasCloudPublicConfig } from "../cloud/publicConfig.ts";
 import * as ServerConfig from "../config.ts";
+import {
+  type BuildPackEntry,
+  copyInstalledFile,
+  installedFileExists,
+  installedPackagesDir,
+  isSafePackName,
+  linkDirectory,
+  listInstalledFiles,
+  readBuildPack,
+  readInstalledText,
+  writeBuildPack,
+} from "./ModBuildPack.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { forkParked } from "../serverActivation.ts";
 
 declare const __T3CODE_BUILD_SOURCE_REPOSITORY__: string | undefined;
 // A fork's build names its own repository; anything else is built from upstream.
@@ -66,10 +81,15 @@ const MOD_METADATA_FILE = "mod.json";
 const MOD_INTENT_FILE = "intent.md";
 const MOD_VERIFY_FILE = "verify.ts";
 const MOD_PATCH_FILE = "patch.diff";
+const MOD_FILES = [MOD_METADATA_FILE, MOD_INTENT_FILE, MOD_VERIFY_FILE, MOD_PATCH_FILE];
 const SOURCE_WORKTREES_SUFFIX = "-mods";
 const BUILD_CHECKOUT_NAME = ".build";
+// Where the check runs, so it can run while the candidate builds.
+const CHECK_CHECKOUT_NAME = ".check";
 // refs/worktree/* is private to each worktree, so every workspace keeps its own base.
 const WORKSPACE_BASE_REF = "refs/worktree/t3-mod-base";
+// The stock commit under that base, to tell when T3 Code itself moved on.
+const WORKSPACE_STOCK_REF = "refs/worktree/t3-mod-stock";
 // The plain build stamps development icons; a candidate keeps the installed app's.
 const CLIENT_ICON_FILES = [
   "favicon.ico",
@@ -117,6 +137,7 @@ const SavedModMetadataSchema = Schema.fromJsonString(
     enabled: Schema.Boolean,
     verifySha256: Schema.String,
     verifyPath: Schema.optionalKey(Schema.String),
+    needsRepair: Schema.optionalKey(Schema.Boolean),
     createdAt: Schema.String,
     updatedAt: Schema.String,
   }),
@@ -130,9 +151,11 @@ const BuildManifestSchema = Schema.fromJsonString(
     buildId: Schema.String,
     baseVersion: Schema.String,
     artifactSha256: Schema.String,
-    entryPath: Schema.String,
+    /** Absent when every mod in the build only changes the web client. */
+    entryPath: Schema.optionalKey(Schema.String),
     clientAssetsDir: Schema.String,
-    proposedModId: Schema.String,
+    /** Absent for a build this machine made by itself after an update. */
+    proposedModId: Schema.optionalKey(Schema.String),
     /** The checkout the proposed change was written in; removed once it is applied. */
     sourceDir: Schema.String,
     workspaceDir: Schema.String,
@@ -153,6 +176,19 @@ const BuildManifestSchema = Schema.fromJsonString(
 const decodeBuildManifest = Schema.decodeUnknownOption(BuildManifestSchema);
 const encodeBuildManifest = Schema.encodeEffect(BuildManifestSchema);
 
+const decodeViteManifest = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        file: Schema.String,
+        css: Schema.optionalKey(Schema.Array(Schema.String)),
+        assets: Schema.optionalKey(Schema.Array(Schema.String)),
+      }),
+    ),
+  ),
+);
+
 const decodePackageName = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ name: Schema.String })),
 );
@@ -171,6 +207,12 @@ export interface ModStatusSnapshot {
   readonly activeOverride: RuntimeOverridePointer | null;
   readonly fallback: RuntimeOverrideFallbackRecord | null;
   readonly mods: ReadonlyArray<SavedModRecord>;
+  /** Approved mods an update left out of what runs, until a build of them is applied again. */
+  readonly paused: ReadonlyArray<SavedModRecord>;
+  /** This machine is making that build itself right now. */
+  readonly rebuilding: boolean;
+  /** Why its last try at that failed. */
+  readonly rebuildFailure: string | null;
 }
 
 /** Installs dependencies and bundles a patched checkout. Tests swap it for a fake. */
@@ -183,10 +225,12 @@ export interface ModBuilder {
   readonly bundle: (input: {
     readonly worktreeDir: string;
     readonly buildDir: string;
+    /** Build the web client alone; the installed server keeps running. */
+    readonly clientOnly: boolean;
     readonly env: NodeJS.ProcessEnv;
     readonly logPath: string;
   }) => Effect.Effect<
-    { readonly entryPath: string; readonly clientAssetsDir: string },
+    { readonly entryPath?: string; readonly clientAssetsDir: string },
     ModServiceError
   >;
 }
@@ -199,12 +243,28 @@ export interface StartModWorkspaceInput {
   readonly builder?: ModBuilder | undefined;
 }
 
+export interface ModBuildDescription {
+  readonly buildId: string;
+  readonly baseVersion: string;
+  readonly artifactSha256: string;
+  readonly restartRequired: boolean;
+  /** Paths inside the build's interface folder. Hashed ones may already be on the other side. */
+  readonly clientFiles: ReadonlyArray<string>;
+  readonly mods: ReadonlyArray<{
+    readonly id: string;
+    readonly title: string;
+    readonly patchSha256: string;
+  }>;
+}
+
 export interface ModWorkspace {
   readonly workspaceDir: string;
   readonly created: boolean;
   /** T3 Code's source moved on since this workspace was made. */
   readonly baseOutdated: boolean;
   readonly savedPatch: "none" | "applied" | "conflicted" | "kept";
+  /** The user's other mods this workspace is built on, so their changes are already in it. */
+  readonly builtOn: ReadonlyArray<{ readonly id: string; readonly title: string }>;
 }
 
 /** The change itself is whatever the mod's workspace holds when this is called. */
@@ -269,16 +329,40 @@ export class ModService extends Context.Service<
     readonly activateBuild: (input: {
       readonly buildId: string;
       readonly expectedArtifactSha256: string;
-    }) => Effect.Effect<{ readonly restartRequired: true }, ModServiceError>;
+    }) => Effect.Effect<{ readonly restartRequired: boolean }, ModServiceError>;
     /** Deletes a candidate that was declined or replaced. The active build is never deleted. */
     readonly discardCandidate: (input: {
       readonly buildId: string;
     }) => Effect.Effect<void, ModServiceError>;
-    readonly disableAll: () => Effect.Effect<void, ModServiceError>;
+    readonly disableAll: () => Effect.Effect<
+      { readonly restartRequired: boolean },
+      ModServiceError
+    >;
     readonly setModEnabled: (input: {
       readonly id: string;
       readonly enabled: boolean;
     }) => Effect.Effect<void, ModServiceError>;
+    /** What another machine needs to know to take over a build that was made here. */
+    readonly describeBuild: (input: {
+      readonly buildId: string;
+    }) => Effect.Effect<ModBuildDescription, ModServiceError>;
+    /** The interface files of a build that this machine has no copy of yet. */
+    readonly missingClientFiles: (
+      files: ReadonlyArray<string>,
+    ) => Effect.Effect<ReadonlyArray<string>>;
+    /** Packs a build into one file at `packPath`, with only the named interface files. */
+    readonly packBuild: (input: {
+      readonly buildId: string;
+      readonly clientFiles: ReadonlyArray<string>;
+      readonly packPath: string;
+    }) => Effect.Effect<void, ModServiceError>;
+    /** Applies a build that was made on another machine running the same T3 Code version. */
+    readonly installBuild: (input: {
+      readonly packPath: string;
+    }) => Effect.Effect<
+      { readonly buildId: string; readonly restartRequired: boolean },
+      ModServiceError
+    >;
     readonly exportMod: (input: {
       readonly id: string;
       readonly destinationDir: string;
@@ -290,6 +374,15 @@ export class ModService extends Context.Service<
       readonly sourceDir?: string | undefined;
       readonly builder?: ModBuilder | undefined;
     }) => Effect.Effect<ReadonlyArray<ModUpgradeCheckEntry>, ModServiceError>;
+    /**
+     * Brings the user's mods back after an update: builds the ones that still fit this version
+     * and applies that build. One that no longer fits is turned off and marked for repair.
+     * Does nothing on a machine that has never built a mod, which waits for a copy.
+     */
+    readonly rebuildAfterUpdate: (input?: {
+      readonly sourceDir?: string | undefined;
+      readonly builder?: ModBuilder | undefined;
+    }) => Effect.Effect<void, ModServiceError>;
   }
 >()("t3/mods/ModService") {}
 
@@ -384,9 +477,13 @@ const make = Effect.gen(function* () {
   const currentVersion = packageJson.version;
   // A single-executable install has no `node` of its own to run scripts with.
   const nodeCommand = NodeSea.isSea() ? "node" : hostExecutable;
+  // This process loaded a mod's server build, so only a restart brings another server in.
+  const runsCustomServer = claimedRuntimeOverride() !== null;
   const activePreviewRef = yield* Ref.make<Option.Option<ActivePreviewProcess>>(Option.none());
   // One build checkout per source, so candidates build one at a time.
   const buildLock = yield* Semaphore.make(1);
+  const rebuilding = yield* Ref.make(false);
+  const rebuildFailure = yield* Ref.make<string | null>(null);
 
   const closeScope = (scope: Scope.Closeable) => Scope.close(scope, Exit.void).pipe(Effect.ignore);
 
@@ -692,20 +789,24 @@ const make = Effect.gen(function* () {
     }),
     bundle: Effect.fn("ModService.bundle")(function* (input) {
       const serverDist = path.join(input.worktreeDir, "apps", "server", "dist");
+      const webDist = path.join(input.worktreeDir, "apps", "web", "dist");
       // The server build copies the client over its last output, so stale assets would pile up.
       yield* Effect.all([
         fs.remove(serverDist, { recursive: true, force: true }),
-        fs.remove(path.join(input.worktreeDir, "apps", "web", "dist"), {
-          recursive: true,
-          force: true,
-        }),
+        fs.remove(webDist, { recursive: true, force: true }),
       ]).pipe(Effect.ignore);
 
       const step = yield* runStep({
         stage: "build",
         label: "Building T3 Code",
         command: "vp",
-        args: ["run", "--filter", "@t3tools/web", "--filter", "t3", "build"],
+        args: [
+          "run",
+          "--filter",
+          "@t3tools/web",
+          ...(input.clientOnly ? [] : ["--filter", "t3"]),
+          "build",
+        ],
         cwd: input.worktreeDir,
         env: input.env,
         logPath: input.logPath,
@@ -718,28 +819,41 @@ const make = Effect.gen(function* () {
         });
       }
 
+      const builtClientDir = input.clientOnly ? webDist : path.join(serverDist, "client");
       const installedClientDir = config.staticDir;
       if (installedClientDir !== undefined) {
         yield* Effect.forEach(
           CLIENT_ICON_FILES,
           (file) =>
             fs.readFile(path.join(installedClientDir, file)).pipe(
-              Effect.flatMap((icon) => fs.writeFile(path.join(serverDist, "client", file), icon)),
+              Effect.flatMap((icon) => fs.writeFile(path.join(builtClientDir, file), icon)),
               Effect.ignore,
             ),
           { discard: true },
         );
       }
 
+      const targetDist = path.join(input.buildDir, "dist");
+      const clientAssetsDir = path.join(targetDist, "client");
+      const storeFailed = failAs("build", "Could not store the built candidate.");
+      if (input.clientOnly) {
+        yield* fs
+          .makeDirectory(targetDist, { recursive: true })
+          .pipe(Effect.andThen(fs.copy(webDist, clientAssetsDir)), Effect.mapError(storeFailed));
+        return { clientAssetsDir };
+      }
+
       // The process monitor is a native helper that ships beside the server, not in its build.
-      const installedMonitorDir = path.join(import.meta.dirname, "resource-monitor");
+      const installedMonitorDir = path.join(
+        claimedRuntimeOverride()?.stockDir ?? import.meta.dirname,
+        "resource-monitor",
+      );
       if (yield* exists(installedMonitorDir)) {
         yield* fs
           .copy(installedMonitorDir, path.join(serverDist, "resource-monitor"))
           .pipe(Effect.ignore);
       }
 
-      const targetDist = path.join(input.buildDir, "dist");
       yield* fs.makeDirectory(input.buildDir, { recursive: true }).pipe(
         Effect.andThen(fs.copy(serverDist, targetDist)),
         // The bundle leaves native packages out. It loads the ones its own source was installed
@@ -750,12 +864,9 @@ const make = Effect.gen(function* () {
             path.join(input.buildDir, "node_modules"),
           ),
         ),
-        Effect.mapError(failAs("build", "Could not store the built candidate.")),
+        Effect.mapError(storeFailed),
       );
-      return {
-        entryPath: path.join(targetDist, CUSTOM_BUILD_ENTRY),
-        clientAssetsDir: path.join(targetDist, "client"),
-      };
+      return { entryPath: path.join(targetDist, CUSTOM_BUILD_ENTRY), clientAssetsDir };
     }),
   };
 
@@ -907,18 +1018,40 @@ const make = Effect.gen(function* () {
         const mod = yield* readModDir(path.join(paths.patchesDir, entry));
         if (Option.isSome(mod)) records.push(mod.value);
       }
-      return records;
+      // Mods stack in the order they were made, so a later one can build on an earlier one.
+      return records.toSorted(
+        (left, right) =>
+          left.metadata.createdAt.localeCompare(right.metadata.createdAt) ||
+          left.metadata.id.localeCompare(right.metadata.id),
+      );
     },
   );
 
   const status: ModService["Service"]["status"] = Effect.fn("ModService.status")(function* () {
     const mods = yield* listMods();
+    const activeOverride = readRuntimeOverridePointer(config.stateDir);
+    const fallback = readRuntimeOverrideFallback(config.stateDir);
     return {
       currentVersion,
-      activeOverride: readRuntimeOverridePointer(config.stateDir),
-      fallback: readRuntimeOverrideFallback(config.stateDir),
+      activeOverride,
+      fallback,
       mods,
+      paused:
+        activeOverride === null && fallback?.reason === "version_mismatch"
+          ? mods.filter((mod) => mod.metadata.enabled)
+          : [],
+      rebuilding: yield* Ref.get(rebuilding),
+      rebuildFailure: yield* Ref.get(rebuildFailure),
     };
+  });
+
+  /** The user's other mods, split around where this one sits in the stack. A new mod is last. */
+  const otherModsAround = Effect.fn("ModService.otherModsAround")(function* (id: string) {
+    const mods = (yield* listMods()).filter((mod) => mod.metadata.enabled);
+    const index = mods.findIndex((mod) => mod.metadata.id === id);
+    return index === -1
+      ? { earlier: mods, later: [] }
+      : { earlier: mods.slice(0, index), later: mods.slice(index + 1) };
   });
 
   const saveModFiles = Effect.fn("ModService.saveModFiles")(function* (input: {
@@ -932,6 +1065,7 @@ const make = Effect.gen(function* () {
     readonly verifySha256: string;
     readonly baseVersion: string;
     readonly enabled: boolean;
+    readonly needsRepair?: boolean;
   }) {
     const existing = yield* readModDir(input.dirPath);
     const nowIso = DateTime.formatIso(yield* DateTime.now);
@@ -943,6 +1077,7 @@ const make = Effect.gen(function* () {
       enabled: input.enabled,
       verifySha256: input.verifySha256,
       verifyPath: input.verifyPath,
+      ...(input.needsRepair === true ? { needsRepair: true } : {}),
       createdAt: Option.isSome(existing) ? existing.value.metadata.createdAt : nowIso,
       updatedAt: nowIso,
     };
@@ -963,6 +1098,51 @@ const make = Effect.gen(function* () {
         Effect.mapError(failAs("storage", "Failed to save the mod.")),
       );
     return { metadata, dirPath: input.dirPath };
+  });
+
+  /** Saves an approved mod again as it is, apart from `changes`. */
+  const resaveMod = (
+    mod: SavedModRecord,
+    changes: {
+      readonly enabled: boolean;
+      readonly baseVersion?: string;
+      readonly needsRepair?: boolean;
+    },
+  ) =>
+    saveModFiles({
+      dirPath: path.join(paths.patchesDir, mod.metadata.id),
+      id: mod.metadata.id,
+      title: mod.metadata.title,
+      intent: mod.intent,
+      verifySource: mod.verifySource,
+      verifyPath: mod.metadata.verifyPath ?? VERIFY_SCRIPT_FILENAME,
+      patchDiff: mod.patchDiff,
+      verifySha256: mod.metadata.verifySha256,
+      baseVersion: mod.metadata.baseVersion,
+      ...changes,
+    });
+
+  /** Makes `build` the one this T3 Code runs: its interface at once, its server from the next start. */
+  const pointTo = Effect.fn("ModService.pointTo")(function* (build: {
+    readonly buildId: string;
+    readonly baseVersion: string;
+    readonly artifactSha256: string;
+    readonly entryPath?: string | undefined;
+    readonly clientAssetsDir: string;
+    readonly mods: ReadonlyArray<RuntimeOverrideModSummary>;
+  }) {
+    writeRuntimeOverridePointer(config.stateDir, {
+      schemaVersion: 1,
+      buildId: build.buildId,
+      baseVersion: build.baseVersion,
+      artifactSha256: build.artifactSha256,
+      // Only a build with its own server has a start that can fail.
+      ...(build.entryPath !== undefined ? { entryPath: build.entryPath, pendingTrial: true } : {}),
+      clientAssetsDir: build.clientAssetsDir,
+      mods: build.mods.map(({ id, title, verifySha256 }) => ({ id, title, verifySha256 })),
+      activatedAt: DateTime.formatIso(yield* DateTime.now),
+    });
+    clearRuntimeOverrideFallback(config.stateDir);
   });
 
   const readManifest = Effect.fn("ModService.readManifest")(function* (buildId: string) {
@@ -997,14 +1177,15 @@ const make = Effect.gen(function* () {
       .pipe(Effect.ignore);
   });
 
-  /** Resets the shared build checkout to stock, with dependencies installed. */
+  /** Resets one of the shared build checkouts to stock, with dependencies installed. */
   const prepareBuildCheckout = Effect.fn("ModService.prepareBuildCheckout")(function* (input: {
+    readonly name: typeof BUILD_CHECKOUT_NAME | typeof CHECK_CHECKOUT_NAME;
     readonly source: ModSource;
     readonly baseCommit: string;
     readonly builder: ModBuilder;
     readonly logPrefix: string;
   }) {
-    const worktreeDir = path.join(worktreesRoot(input.source), BUILD_CHECKOUT_NAME);
+    const worktreeDir = path.join(worktreesRoot(input.source), input.name);
     yield* ensureWorktree(input.source, worktreeDir, input.baseCommit);
     yield* gitOrFail(
       worktreeDir,
@@ -1036,7 +1217,7 @@ const make = Effect.gen(function* () {
         worktreeDir,
         env,
         builder: input.builder,
-        logPath: `${input.logPrefix}-install.log`,
+        logPath: `${input.logPrefix}-install${input.name}.log`,
       });
     yield* installDependencies();
     return { worktreeDir, env, installDependencies };
@@ -1063,21 +1244,37 @@ const make = Effect.gen(function* () {
     }
 
     const created = yield* ensureWorktree(source, workspaceDir, baseCommit);
+    // The workspace is T3 Code as the user has it, earlier mods included: a change next to one
+    // of theirs is then written against it, and the diff from this base is still this mod alone.
+    const { earlier } = yield* otherModsAround(input.id);
+    const builtOn = earlier.map((mod) => ({ id: mod.metadata.id, title: mod.metadata.title }));
     if (!created) {
-      const workspaceBase = yield* git(workspaceDir, ["rev-parse", WORKSPACE_BASE_REF]);
+      const workspaceStock = yield* git(workspaceDir, ["rev-parse", WORKSPACE_STOCK_REF]);
       return {
         workspaceDir,
         created: false,
-        baseOutdated: workspaceBase.stdout.trim() !== baseCommit,
+        baseOutdated: workspaceStock.stdout.trim() !== baseCommit,
         savedPatch: "kept" as const,
+        builtOn,
       };
     }
 
-    yield* gitOrFail(
-      workspaceDir,
-      ["update-ref", WORKSPACE_BASE_REF, baseCommit],
-      "source",
-      "Could not prepare the mod workspace",
+    yield* Effect.forEach(earlier, (mod) => applyOrRestore(workspaceDir, mod.patchDiff), {
+      discard: true,
+    });
+    yield* Effect.forEach(
+      [
+        [WORKSPACE_STOCK_REF, baseCommit],
+        [WORKSPACE_BASE_REF, "HEAD"],
+      ] as const,
+      ([ref, target]) =>
+        gitOrFail(
+          workspaceDir,
+          ["update-ref", ref, target],
+          "source",
+          "Could not prepare the mod workspace",
+        ),
+      { discard: true },
     );
     const saved = yield* readModDir(path.join(paths.patchesDir, input.id));
     const savedPatch = Option.isNone(saved)
@@ -1099,7 +1296,7 @@ const make = Effect.gen(function* () {
         });
       }),
     );
-    return { workspaceDir, created: true, baseOutdated: false, savedPatch };
+    return { workspaceDir, created: true, baseOutdated: false, savedPatch, builtOn };
   });
 
   const readWorkspacePatch = Effect.fn("ModService.readWorkspacePatch")(function* (
@@ -1186,9 +1383,8 @@ const make = Effect.gen(function* () {
     const verifySha256 = computeTextSha256(input.verifySource);
     const builder = input.builder ?? defaultBuilder;
     // Every other approved mod stays in the build, or applying this one would drop them.
-    const otherMods = (yield* listMods()).filter(
-      (mod) => mod.metadata.enabled && mod.metadata.id !== input.id,
-    );
+    const stack = yield* otherModsAround(input.id);
+    const otherMods = [...stack.earlier, ...stack.later];
 
     // A newer proposal for the same mod replaces the builds of its earlier ones.
     const earlierBuilds = yield* fs
@@ -1211,54 +1407,93 @@ const make = Effect.gen(function* () {
     )(
       Effect.scoped(
         Effect.gen(function* () {
-          const checkout = yield* prepareBuildCheckout({ source, baseCommit, builder, logPrefix });
+          const checkout = yield* prepareBuildCheckout({
+            name: BUILD_CHECKOUT_NAME,
+            source,
+            baseCommit,
+            builder,
+            logPrefix,
+          });
           // After an update a saved mod may not apply any more. It is left out, not a dead end:
           // the user sees that on the card, and repairs it as its own proposal afterwards.
-          const includedMods: Array<SavedModRecord> = [];
-          for (const mod of otherMods) {
-            const applied = yield* applyOrRestore(checkout.worktreeDir, mod.patchDiff);
-            if (applied.ok) includedMods.push(mod);
-          }
-
-          const stockRun = yield* runVerify({
-            worktreeDir: checkout.worktreeDir,
-            verifySource: input.verifySource,
-            verifyPath,
-            env: checkout.env,
-            logPath: `${logPrefix}-verify-stock.log`,
+          const applyAll = Effect.fn("ModService.applyAll")(function* (
+            worktreeDir: string,
+            mods: ReadonlyArray<SavedModRecord>,
+          ) {
+            const applied: Array<SavedModRecord> = [];
+            for (const mod of mods) {
+              if ((yield* applyOrRestore(worktreeDir, mod.patchDiff)).ok) applied.push(mod);
+            }
+            return applied;
           });
-
+          const includedEarlier = yield* applyAll(checkout.worktreeDir, stack.earlier);
           const applied = yield* applyOrRestore(checkout.worktreeDir, patchDiff);
           if (!applied.ok) {
             return yield* new ModServiceError({
               stage: "patch",
-              reason: `The change does not apply on top of your other mods (${includedMods.map((mod) => mod.metadata.id).join(", ") || "none"}): ${applied.output}`,
+              reason: `The change does not apply on top of your other mods (${includedEarlier.map((mod) => mod.metadata.id).join(", ") || "none"}). Call t3_mod_start with reset to rebuild the workspace on top of them: ${applied.output}`,
             });
           }
+          const includedMods = [
+            ...includedEarlier,
+            ...(yield* applyAll(checkout.worktreeDir, stack.later)),
+          ];
+          const clientOnly =
+            isClientOnlyChange(guardrails.files) &&
+            includedMods.every((mod) =>
+              isClientOnlyChange(checkPatchGuardrails(mod.patchDiff).files),
+            );
           yield* checkout.installDependencies();
 
-          const candidateRun = yield* runVerify({
-            worktreeDir: checkout.worktreeDir,
-            verifySource: input.verifySource,
-            verifyPath,
-            env: checkout.env,
-            logPath: `${logPrefix}-verify-candidate.log`,
-          });
-          if (!candidateRun.passed) {
-            return yield* new ModServiceError({
-              stage: "verify",
-              reason: describeFailure("The check failed with the change applied", candidateRun),
+          // The check runs without the change and then with it, in a checkout of its own: that
+          // takes about as long as the build, and the check file must not end up in the build.
+          const checks = Effect.gen(function* () {
+            const checked = yield* prepareBuildCheckout({
+              name: CHECK_CHECKOUT_NAME,
+              source,
+              baseCommit,
+              builder,
+              logPrefix,
             });
-          }
-
-          const built = yield* builder.bundle({
+            const runCheck = (label: "stock" | "candidate") =>
+              runVerify({
+                worktreeDir: checked.worktreeDir,
+                verifySource: input.verifySource,
+                verifyPath,
+                env: checked.env,
+                logPath: `${logPrefix}-verify-${label}.log`,
+              });
+            yield* applyAll(checked.worktreeDir, includedEarlier);
+            const stockRun = yield* runCheck("stock");
+            yield* applyOrRestore(checked.worktreeDir, patchDiff);
+            yield* checked.installDependencies();
+            const candidateRun = yield* runCheck("candidate");
+            if (!candidateRun.passed) {
+              return yield* new ModServiceError({
+                stage: "verify",
+                reason: describeFailure("The check failed with the change applied", candidateRun),
+              });
+            }
+            return stockRun;
+          });
+          const bundle = builder.bundle({
             worktreeDir: checkout.worktreeDir,
             buildDir,
+            clientOnly,
             env: checkout.env,
             logPath: `${logPrefix}-build.log`,
           });
-          return { stockFailed: !stockRun.passed, includedMods, ...built };
+
+          // Each runs to its end: a build tool cut off mid-run leaves children writing here.
+          const [stock, built] = yield* Effect.all([Effect.exit(checks), Effect.exit(bundle)], {
+            concurrency: 2,
+          });
+          const stockRun = yield* stock;
+          return { ...(yield* built), stockFailed: !stockRun.passed, includedMods };
         }),
+      ).pipe(
+        // A check or build that failed leaves a half-written candidate behind.
+        Effect.tapError(() => removeBuild(buildId).pipe(Effect.ignore)),
       ),
     );
 
@@ -1277,7 +1512,7 @@ const make = Effect.gen(function* () {
       buildId,
       baseVersion: currentVersion,
       artifactSha256,
-      entryPath,
+      ...(entryPath !== undefined ? { entryPath } : {}),
       clientAssetsDir,
       proposedModId: input.id,
       sourceDir: source.dir,
@@ -1348,6 +1583,7 @@ const make = Effect.gen(function* () {
           ? "The check failed on your current T3 Code and passed with the change."
           : "The check passed with and without the change.",
       },
+      restartRequired: entryPath !== undefined || runsCustomServer,
     } satisfies ModApprovalPreview;
   });
 
@@ -1381,9 +1617,10 @@ const make = Effect.gen(function* () {
           {
             env: {
               ...sanitizedModEnv(hostEnv, sandboxHome),
-              [RUNTIME_OVERRIDE_ENV_ACTIVE]: "1",
-              [RUNTIME_OVERRIDE_ENV_ENTRY]: manifest.entryPath,
-              [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: manifest.clientAssetsDir,
+              ...(manifest.entryPath === undefined
+                ? // The stock server, showing the candidate's client.
+                  { [RUNTIME_OVERRIDE_ENV_STATIC_DIR]: manifest.clientAssetsDir }
+                : runtimeOverrideEnv(manifest)),
             },
             extendEnv: false,
             stdout: "pipe",
@@ -1458,18 +1695,7 @@ const make = Effect.gen(function* () {
         reason: `Mod "${id}" was not found.`,
       });
     }
-    yield* saveModFiles({
-      dirPath,
-      id: existing.value.metadata.id,
-      title: existing.value.metadata.title,
-      intent: existing.value.intent,
-      verifySource: existing.value.verifySource,
-      verifyPath: existing.value.metadata.verifyPath ?? VERIFY_SCRIPT_FILENAME,
-      patchDiff: existing.value.patchDiff,
-      verifySha256: existing.value.metadata.verifySha256,
-      baseVersion: existing.value.metadata.baseVersion,
-      enabled,
-    });
+    yield* resaveMod(existing.value, { enabled });
   });
 
   const activateBuild: ModService["Service"]["activateBuild"] = Effect.fn(
@@ -1551,32 +1777,25 @@ const make = Effect.gen(function* () {
       baseVersion: manifest.baseVersion,
       enabled: true,
     });
-    const nowIso = DateTime.formatIso(yield* DateTime.now);
-    writeRuntimeOverridePointer(config.stateDir, {
-      schemaVersion: 1,
-      buildId: manifest.buildId,
-      baseVersion: manifest.baseVersion,
-      artifactSha256: manifest.artifactSha256,
-      entryPath: manifest.entryPath,
-      clientAssetsDir: manifest.clientAssetsDir,
-      mods: manifest.mods.map(({ id, title, verifySha256 }) => ({ id, title, verifySha256 })),
-      activatedAt: nowIso,
-      pendingTrial: true,
-    });
-    clearRuntimeOverrideFallback(config.stateDir);
+    yield* pointTo(manifest);
 
-    // Every other build predates this approval, so none of them can be applied any more.
+    // Every other build predates this approval, so none of them can be applied any more. The
+    // saved mod is the source of truth now, so its workspace goes too. Both hold hundreds of
+    // megabytes, and the answer does not wait for them to be deleted.
     const builds = yield* fs.readDirectory(paths.buildsDir).pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(
       builds.filter((entry) => entry !== buildId && BUILD_ID_PATTERN.test(entry)),
       removeBuild,
       { discard: true },
-    );
-    // The saved mod is the source of truth now; a later edit starts from it in a fresh workspace.
-    yield* git(manifest.sourceDir, ["worktree", "remove", "--force", manifest.workspaceDir]).pipe(
+    ).pipe(
+      Effect.andThen(
+        git(manifest.sourceDir, ["worktree", "remove", "--force", manifest.workspaceDir]),
+      ),
       Effect.ignore,
+      Effect.forkIn(serviceScope),
     );
-    return { restartRequired: true as const };
+    // The stock server serves a client-only build from its next page load on.
+    return { restartRequired: manifest.entryPath !== undefined || runsCustomServer };
   });
 
   const discardCandidate: ModService["Service"]["discardCandidate"] = Effect.fn(
@@ -1588,6 +1807,7 @@ const make = Effect.gen(function* () {
   const disableAll: ModService["Service"]["disableAll"] = Effect.fn("ModService.disableAll")(
     function* () {
       yield* stopActivePreview();
+      const active = readRuntimeOverridePointer(config.stateDir);
       clearRuntimeOverridePointer(config.stateDir);
       clearRuntimeOverrideFallback(config.stateDir);
       // Off stays off: a mod left enabled would ride back in with the next mod's build.
@@ -1596,7 +1816,275 @@ const make = Effect.gen(function* () {
         (mod) => setModEnabled({ id: mod.metadata.id, enabled: false }),
         { discard: true },
       );
+      return { restartRequired: active?.entryPath !== undefined || runsCustomServer };
     },
+  );
+
+  // The installed T3 Code: its own interface, native helper and native packages.
+  const stockDir =
+    claimedRuntimeOverride()?.stockDir ??
+    (NodeSea.isSea() ? path.dirname(hostExecutable) : import.meta.dirname);
+  // Vite names these after their contents, so a file with the same name is the same file.
+  const isHashedAsset = (file: string) => /^assets\/.+-[\w-]{8}\.[^/]+$/.test(file);
+  const clientPools = () =>
+    [
+      path.join(stockDir, "client"),
+      config.staticDir,
+      readRuntimeOverridePointer(config.stateDir)?.clientAssetsDir,
+    ].filter((dir): dir is string => dir !== undefined);
+  const findClientFile = (file: string) =>
+    Option.fromNullishOr(
+      clientPools()
+        .map((pool) => path.join(pool, file))
+        .find(installedFileExists),
+    );
+  const listFiles = Effect.fn("ModService.listFiles")(function* (dir: string) {
+    const entries = yield* fs
+      .readDirectory(dir, { recursive: true })
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+    const files: Array<string> = [];
+    for (const entry of entries) {
+      const info = yield* fs.stat(path.join(dir, entry)).pipe(Effect.orElseSucceed(() => null));
+      if (info?.type === "File") files.push(entry.replaceAll("\\", "/"));
+    }
+    return files.toSorted();
+  });
+  const readViteFiles = (clientDir: string): ReadonlyArray<string> => {
+    const manifest = Option.getOrUndefined(
+      decodeViteManifest(readInstalledText(path.join(clientDir, ".vite", "manifest.json"))),
+    );
+    return manifest === undefined
+      ? []
+      : Object.values(manifest).flatMap((entry) => [
+          entry.file,
+          ...(entry.css ?? []),
+          ...(entry.assets ?? []),
+        ]);
+  };
+
+  const describeBuild: ModService["Service"]["describeBuild"] = Effect.fn(
+    "ModService.describeBuild",
+  )(function* ({ buildId }) {
+    const manifest = yield* readManifest(buildId);
+    const referenced = new Set(readViteFiles(manifest.clientAssetsDir));
+    const clientFiles: Array<string> = [];
+    // A build folder can hold hashed files nothing refers to any more; those stay behind.
+    for (const file of yield* listFiles(manifest.clientAssetsDir)) {
+      if (
+        !isHashedAsset(file) ||
+        referenced.has(file) ||
+        installedFileExists(path.join(stockDir, "client", file))
+      ) {
+        clientFiles.push(file);
+      }
+    }
+    return {
+      buildId,
+      baseVersion: manifest.baseVersion,
+      artifactSha256: manifest.artifactSha256,
+      restartRequired: manifest.entryPath !== undefined,
+      clientFiles,
+      mods: manifest.mods.map(({ id, title, patchSha256 }) => ({ id, title, patchSha256 })),
+    };
+  });
+
+  const missingClientFiles: ModService["Service"]["missingClientFiles"] = (files) =>
+    Effect.sync(() =>
+      files.filter(
+        (file) =>
+          isSafePackName(file) && (!isHashedAsset(file) || Option.isNone(findClientFile(file))),
+      ),
+    );
+
+  const packBuild: ModService["Service"]["packBuild"] = Effect.fn("ModService.packBuild")(
+    function* ({ buildId, clientFiles, packPath }) {
+      const manifest = yield* readManifest(buildId);
+      const buildDir = path.join(paths.buildsDir, buildId);
+      const offered = new Set((yield* describeBuild({ buildId })).clientFiles);
+      const entries: Array<BuildPackEntry> = [
+        { name: BUILD_MANIFEST_FILE, filePath: path.join(buildDir, BUILD_MANIFEST_FILE) },
+      ];
+      if (manifest.entryPath !== undefined) {
+        const distDir = path.dirname(manifest.entryPath);
+        for (const file of yield* listFiles(distDir)) {
+          // The interface is packed below, the native helper is each machine's own, and source
+          // maps double the size for a stack trace nobody reads there.
+          if (
+            file.startsWith("client/") ||
+            file.startsWith("resource-monitor/") ||
+            file.endsWith(".map")
+          ) {
+            continue;
+          }
+          entries.push({ name: `dist/${file}`, filePath: path.join(distDir, file) });
+        }
+      }
+      for (const file of clientFiles) {
+        if (!offered.has(file)) continue;
+        entries.push({
+          name: `dist/client/${file}`,
+          filePath: path.join(manifest.clientAssetsDir, file),
+        });
+      }
+      for (const mod of manifest.mods) {
+        const saved = path.join(paths.patchesDir, mod.id);
+        const modDir = (yield* exists(path.join(saved, MOD_METADATA_FILE)))
+          ? saved
+          : path.join(buildDir, BUILD_PROPOSED_MOD_DIR);
+        for (const file of MOD_FILES) {
+          entries.push({ name: `mods/${mod.id}/${file}`, filePath: path.join(modDir, file) });
+        }
+      }
+      yield* Effect.try({
+        try: () => writeBuildPack(packPath, entries),
+        catch: failAs("storage", "Could not pack the build for another machine."),
+      });
+    },
+  );
+
+  const installBuild: ModService["Service"]["installBuild"] = Effect.fn("ModService.installBuild")(
+    function* ({ packPath }) {
+      const failed = (reason: string) => failAs("activate", reason);
+      const incoming = path.join(paths.buildsDir, `.incoming-${yield* random.uuidV4()}`);
+      yield* Effect.addFinalizer(() =>
+        fs.remove(incoming, { recursive: true, force: true }).pipe(Effect.ignore),
+      );
+      yield* Effect.try({
+        try: () => readBuildPack(packPath, incoming),
+        catch: failed("The build from the other machine arrived damaged."),
+      });
+      const manifest = yield* fs.readFileString(path.join(incoming, BUILD_MANIFEST_FILE)).pipe(
+        Effect.map(decodeBuildManifest),
+        Effect.orElseSucceed(() => Option.none()),
+      );
+      if (Option.isNone(manifest) || !BUILD_ID_PATTERN.test(manifest.value.buildId)) {
+        return yield* new ModServiceError({
+          stage: "activate",
+          reason: "The build from the other machine has no readable description.",
+        });
+      }
+      const { buildId } = manifest.value;
+      if (manifest.value.baseVersion !== currentVersion) {
+        return yield* new ModServiceError({
+          stage: "activate",
+          reason: `The build is for T3 Code ${manifest.value.baseVersion}, and this machine runs ${currentVersion}.`,
+        });
+      }
+      const buildDir = path.join(paths.buildsDir, buildId);
+      const servesItsOwnServer = manifest.value.entryPath !== undefined;
+      if (readRuntimeOverridePointer(config.stateDir)?.buildId === buildId) {
+        return { buildId, restartRequired: servesItsOwnServer && !runsCustomServer };
+      }
+
+      // Files this machine already had were left out of the pack.
+      const clientDir = path.join(incoming, "dist", "client");
+      const completed = yield* Effect.try({
+        try: () => {
+          for (const file of [
+            ...readViteFiles(clientDir),
+            // Files of the installed interface that no build step names, such as its icons.
+            ...listInstalledFiles(path.join(stockDir, "client")),
+          ]) {
+            const target = path.join(clientDir, file);
+            if (!isSafePackName(file) || installedFileExists(target)) continue;
+            const local = Option.getOrUndefined(findClientFile(file));
+            if (local === undefined) return file;
+            copyInstalledFile(local, target);
+          }
+          if (!servesItsOwnServer) return null;
+          // The native helper is each machine's own.
+          const monitorDir = path.join(stockDir, "resource-monitor");
+          for (const file of listInstalledFiles(monitorDir)) {
+            copyInstalledFile(
+              path.join(monitorDir, file),
+              path.join(incoming, "dist", "resource-monitor", file),
+            );
+          }
+          // The bundle leaves native packages out and loads the installed T3 Code's own.
+          const packages = installedPackagesDir(
+            stockDir,
+            path.join(paths.modsDir, "packages", currentVersion),
+          );
+          if (packages === null) return "node_modules";
+          linkDirectory(packages, path.join(incoming, "node_modules"));
+          return null;
+        },
+        catch: failed("Could not complete the build with this machine's own files."),
+      });
+      if (completed !== null) {
+        return yield* new ModServiceError({
+          stage: "activate",
+          reason: `The build needs ${completed}, and this machine has no copy of it.`,
+        });
+      }
+
+      // The other machine's path to its entry file; only the file's name holds here.
+      const entryName = path.basename(manifest.value.entryPath ?? CUSTOM_BUILD_ENTRY);
+      const entryPath = servesItsOwnServer ? path.join(buildDir, "dist", entryName) : undefined;
+      const clientAssetsDir = path.join(buildDir, "dist", "client");
+      const installed = {
+        ...manifest.value,
+        ...(entryPath !== undefined ? { entryPath } : {}),
+        clientAssetsDir,
+        sourceDir: "",
+        workspaceDir: "",
+        skippedModIds: [],
+      };
+      yield* encodeBuildManifest(installed).pipe(
+        Effect.flatMap((text) =>
+          fs.writeFileString(path.join(incoming, BUILD_MANIFEST_FILE), text),
+        ),
+        Effect.andThen(fs.remove(buildDir, { recursive: true, force: true })),
+        Effect.andThen(fs.rename(incoming, buildDir)),
+        Effect.mapError(failed("Could not store the build on this machine.")),
+      );
+      if (
+        computeRuntimeOverrideArtifactSha256(entryPath, clientAssetsDir) !==
+        manifest.value.artifactSha256
+      ) {
+        yield* fs.remove(buildDir, { recursive: true, force: true }).pipe(Effect.ignore);
+        return yield* new ModServiceError({
+          stage: "activate",
+          activation: "artifact_mismatch",
+          reason: "The build does not match what was approved on the other machine.",
+        });
+      }
+
+      // This machine's mods become the build's: any other one would be gone from what runs.
+      const included = new Set(manifest.value.mods.map((mod) => mod.id));
+      for (const mod of manifest.value.mods) {
+        const arrived = yield* readModDir(path.join(buildDir, "mods", mod.id));
+        if (Option.isNone(arrived)) continue;
+        yield* saveModFiles({
+          dirPath: path.join(paths.patchesDir, mod.id),
+          id: mod.id,
+          title: arrived.value.metadata.title,
+          intent: arrived.value.intent,
+          verifySource: arrived.value.verifySource,
+          verifyPath: arrived.value.metadata.verifyPath ?? VERIFY_SCRIPT_FILENAME,
+          patchDiff: arrived.value.patchDiff,
+          verifySha256: arrived.value.metadata.verifySha256,
+          baseVersion: manifest.value.baseVersion,
+          enabled: true,
+        });
+      }
+      yield* Effect.forEach(
+        (yield* listMods()).filter((mod) => mod.metadata.enabled && !included.has(mod.metadata.id)),
+        (mod) => setModEnabled({ id: mod.metadata.id, enabled: false }),
+        { discard: true },
+      );
+
+      yield* stopActivePreview();
+      yield* pointTo({ ...manifest.value, entryPath, clientAssetsDir });
+      const builds = yield* fs.readDirectory(paths.buildsDir).pipe(Effect.orElseSucceed(() => []));
+      yield* Effect.forEach(
+        builds.filter((entry) => entry !== buildId && BUILD_ID_PATTERN.test(entry)),
+        removeBuild,
+        { discard: true },
+      ).pipe(Effect.ignore, Effect.forkIn(serviceScope));
+      return { buildId, restartRequired: servesItsOwnServer || runsCustomServer };
+    },
+    Effect.scoped,
   );
 
   const exportMod: ModService["Service"]["exportMod"] = Effect.fn("ModService.exportMod")(
@@ -1701,6 +2189,7 @@ const make = Effect.gen(function* () {
           Effect.scoped(
             Effect.gen(function* () {
               const checkout = yield* prepareBuildCheckout({
+                name: BUILD_CHECKOUT_NAME,
                 source,
                 baseCommit,
                 builder,
@@ -1756,6 +2245,161 @@ const make = Effect.gen(function* () {
     },
   );
 
+  // A machine that only ever received builds has no source, and maybe no tools to build one.
+  const buildsModsHere = Effect.fn("ModService.buildsModsHere")(function* (sourceDir?: string) {
+    if (sourceDir?.trim() || hostEnv.T3CODE_MOD_SOURCE_DIR?.trim()) return true;
+    if (Option.isSome(yield* findAncestor(import.meta.dirname, isT3CodeCheckout))) return true;
+    return yield* exists(path.join(paths.sourceDir, ".git"));
+  });
+
+  const modKey = (mod: SavedModRecord) => `${mod.metadata.id}:${computeTextSha256(mod.patchDiff)}`;
+
+  const rebuildPaused = Effect.fn("ModService.rebuildPaused")(function* (
+    paused: ReadonlyArray<SavedModRecord>,
+    input: Parameters<ModService["Service"]["rebuildAfterUpdate"]>[0],
+  ) {
+    const source = yield* resolveSource(input?.sourceDir);
+    const baseCommit = yield* resolveBaseCommit(source);
+    const builder = input?.builder ?? defaultBuilder;
+    const buildId = `update-${(yield* random.uuidV4()).replaceAll("-", "").slice(0, 12)}`;
+    const buildDir = path.join(paths.buildsDir, buildId);
+    const logPrefix = path.join(paths.logsDir, buildId);
+
+    const { fits, built } = yield* buildLock.withPermits(1)(
+      Effect.scoped(
+        Effect.gen(function* () {
+          // Each mod goes on top of the ones before it, and stays only if its own check passes.
+          const checked = yield* prepareBuildCheckout({
+            name: CHECK_CHECKOUT_NAME,
+            source,
+            baseCommit,
+            builder,
+            logPrefix,
+          });
+          const fits: Array<SavedModRecord> = [];
+          for (const mod of paused) {
+            if (mod.verifyTampered) continue;
+            if (!(yield* applyOrRestore(checked.worktreeDir, mod.patchDiff)).ok) continue;
+            yield* checked.installDependencies();
+            const check = yield* runVerify({
+              worktreeDir: checked.worktreeDir,
+              verifySource: mod.verifySource,
+              verifyPath: mod.metadata.verifyPath ?? VERIFY_SCRIPT_FILENAME,
+              env: checked.env,
+              logPath: `${logPrefix}-verify-${mod.metadata.id}.log`,
+            });
+            if (check.passed) fits.push(mod);
+            else yield* git(checked.worktreeDir, ["reset", "--hard", "HEAD~1"]);
+          }
+          if (fits.length === 0) return { fits, built: null };
+
+          const checkout = yield* prepareBuildCheckout({
+            name: BUILD_CHECKOUT_NAME,
+            source,
+            baseCommit,
+            builder,
+            logPrefix,
+          });
+          yield* Effect.forEach(
+            fits,
+            (mod) => applyOrRestore(checkout.worktreeDir, mod.patchDiff),
+            {
+              discard: true,
+            },
+          );
+          yield* checkout.installDependencies();
+          const built = yield* builder.bundle({
+            worktreeDir: checkout.worktreeDir,
+            buildDir,
+            clientOnly: fits.every((mod) =>
+              isClientOnlyChange(checkPatchGuardrails(mod.patchDiff).files),
+            ),
+            env: checkout.env,
+            logPath: `${logPrefix}-build.log`,
+          });
+          return { fits, built };
+        }),
+      ).pipe(Effect.tapError(() => removeBuild(buildId).pipe(Effect.ignore))),
+    );
+
+    // The user applied or turned off a mod while this was building: what they did stands.
+    const still = (yield* status()).paused.map(modKey);
+    if (still.join("\n") !== paused.map(modKey).join("\n")) return yield* removeBuild(buildId);
+
+    yield* Effect.forEach(
+      paused.filter((mod) => !fits.includes(mod)),
+      (mod) => resaveMod(mod, { enabled: false, needsRepair: true }),
+      { discard: true },
+    );
+    if (built === null) return;
+    const artifactSha256 = computeRuntimeOverrideArtifactSha256(
+      built.entryPath,
+      built.clientAssetsDir,
+    );
+    if (artifactSha256 === null) {
+      return yield* new ModServiceError({
+        stage: "build",
+        reason: "The rebuilt mods are missing their server or their interface.",
+      });
+    }
+    const mods = fits.map((mod) => ({
+      id: mod.metadata.id,
+      title: mod.metadata.title,
+      verifySha256: mod.metadata.verifySha256,
+      patchSha256: computeTextSha256(mod.patchDiff),
+    }));
+    yield* encodeBuildManifest({
+      schemaVersion: 1,
+      buildId,
+      baseVersion: currentVersion,
+      artifactSha256,
+      ...built,
+      sourceDir: source.dir,
+      workspaceDir: "",
+      skippedModIds: [],
+      mods,
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    }).pipe(
+      Effect.flatMap((manifest) =>
+        fs.writeFileString(path.join(buildDir, BUILD_MANIFEST_FILE), `${manifest}\n`),
+      ),
+      Effect.mapError(failAs("build", "Failed to write build manifest.")),
+    );
+    yield* Effect.forEach(
+      fits,
+      (mod) => resaveMod(mod, { enabled: true, baseVersion: currentVersion }),
+      { discard: true },
+    );
+    yield* pointTo({ buildId, baseVersion: currentVersion, artifactSha256, ...built, mods });
+
+    // Builds for the version before the update can never be applied again.
+    const builds = yield* fs.readDirectory(paths.buildsDir).pipe(Effect.orElseSucceed(() => []));
+    yield* Effect.forEach(
+      builds.filter((entry) => entry !== buildId && BUILD_ID_PATTERN.test(entry)),
+      (entry) =>
+        readManifest(entry).pipe(
+          Effect.flatMap((manifest) =>
+            manifest.baseVersion === currentVersion ? Effect.void : removeBuild(entry),
+          ),
+        ),
+      { discard: true },
+    ).pipe(Effect.ignore, Effect.forkIn(serviceScope));
+  });
+
+  const rebuildAfterUpdate: ModService["Service"]["rebuildAfterUpdate"] = Effect.fn(
+    "ModService.rebuildAfterUpdate",
+  )(function* (input) {
+    const { paused } = yield* status();
+    if (paused.length === 0 || config.devUrl !== undefined) return;
+    if (!(yield* buildsModsHere(input?.sourceDir))) return;
+    yield* Ref.set(rebuilding, true);
+    yield* Ref.set(rebuildFailure, null);
+    yield* rebuildPaused(paused, input).pipe(
+      Effect.tapError((error) => Ref.set(rebuildFailure, error.message)),
+      Effect.ensuring(Ref.set(rebuilding, false)),
+    );
+  });
+
   return ModService.of({
     status,
     listMods,
@@ -1766,10 +2410,31 @@ const make = Effect.gen(function* () {
     discardCandidate,
     disableAll,
     setModEnabled,
+    describeBuild,
+    missingClientFiles,
+    packBuild,
+    installBuild,
     exportMod,
     importMod,
     checkUpgrade,
+    rebuildAfterUpdate,
   });
 });
 
 export const layer = Layer.effect(ModService, make);
+
+/** An update leaves the user's mods out of what runs, so a server that is up rebuilds them. */
+export const rebuildAfterUpdateLayer = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const mods = yield* ModService;
+    yield* forkParked(
+      mods
+        .rebuildAfterUpdate()
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("mods were not rebuilt after the update", { cause }),
+          ),
+        ),
+    );
+  }),
+);

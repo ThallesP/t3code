@@ -273,6 +273,7 @@ export const make = Effect.gen(function* () {
       threadPullRequestLinking: true,
       serverResolvedCommandContext: true,
       threadStop: true,
+      modBuildTransfer: true,
       ...(hostPlatform === "win32" ? {} : { localServerStop: true }),
       previewTunnelSetting: true,
       environmentIcon: true,

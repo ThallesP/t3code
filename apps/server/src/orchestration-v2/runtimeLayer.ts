@@ -68,6 +68,7 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as FeedbackStore from "../feedback/FeedbackStore.ts";
 import * as ModService from "../mods/ModService.ts";
 import * as ModApprovalRequests from "../mods/ModApprovalRequests.ts";
+import * as ModBuildTransfer from "../mods/ModBuildTransfer.ts";
 import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
 
@@ -338,10 +339,12 @@ const layerSecretRequestsProvided = SecretRequests.layer.pipe(
 const layerFeedbackStoreProvided = FeedbackStore.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
-const layerModApprovalProvided = ModApprovalRequests.layer.pipe(
-  Layer.provideMerge(ModService.layer),
-  Layer.provide(layerThreadManagementProvided),
-);
+const layerModApprovalProvided = Layer.mergeAll(
+  ModApprovalRequests.layer,
+  ModBuildTransfer.layer,
+  ModBuildTransfer.restartWhenIdleLayer,
+  ModService.rebuildAfterUpdateLayer,
+).pipe(Layer.provideMerge(ModService.layer), Layer.provide(layerThreadManagementProvided));
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(

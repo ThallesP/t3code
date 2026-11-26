@@ -72,8 +72,12 @@ const modDisableCommand = Command.make("disable", { baseDir: baseDirFlag }).pipe
   Command.withHandler(({ baseDir }) =>
     withModService(baseDir, (mods) =>
       Effect.gen(function* () {
-        yield* mods.disableAll();
-        yield* Console.log("Disabled local runtime override. Restart T3 Code to run stock.");
+        const { restartRequired } = yield* mods.disableAll();
+        yield* Console.log(
+          restartRequired
+            ? "Turned every mod off. Restart T3 Code to run stock."
+            : "Turned every mod off. Reload T3 Code to see stock.",
+        );
       }),
     ),
   ),

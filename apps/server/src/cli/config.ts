@@ -5,6 +5,7 @@ import {
   type SignalExport,
 } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { claimedRuntimeOverride } from "@t3tools/shared/runtimeOverride";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
 import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
 import * as Config from "effect/Config";
@@ -428,7 +429,9 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   );
   const staticDir = devUrl
     ? undefined
-    : env.staticDir?.trim() || (yield* ServerConfig.resolveStaticDir());
+    : claimedRuntimeOverride()?.clientAssetsDir ||
+      env.staticDir?.trim() ||
+      (yield* ServerConfig.resolveStaticDir());
   const explicitHost = resolveOptionPrecedence(
     normalizedFlags.host,
     Option.fromUndefinedOr(env.host),

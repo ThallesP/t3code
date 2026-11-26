@@ -2028,6 +2028,22 @@ export function createServerEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.threadId, input.turnItemId]),
       },
     }),
+    modsStatus: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:mods:status",
+      tag: WS_METHODS.modsStatus,
+    }),
+    modsOfferBuild: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:mods:offer-build",
+      tag: WS_METHODS.modsOfferBuild,
+    }),
+    modsPackBuild: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:mods:pack-build",
+      tag: WS_METHODS.modsPackBuild,
+    }),
+    modsRestart: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:mods:restart",
+      tag: WS_METHODS.modsRestart,
+    }),
     answerModApproval: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:mod-approval:answer-request",
       tag: WS_METHODS.modApprovalAnswerRequest,

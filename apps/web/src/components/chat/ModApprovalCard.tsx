@@ -3,7 +3,6 @@ import { pipe } from "effect/Function";
 import {
   modApprovalDisplay,
   modApprovalFailureMessage,
-  shortArtifactDigest,
   type ModApprovalRequestItem,
 } from "@t3tools/client-runtime/mod-approval";
 import {
@@ -17,27 +16,69 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  AlertTriangleIcon,
-  CheckIcon,
-  ChevronDownIcon,
-  LockIcon,
-  MinusIcon,
-  ShieldCheckIcon,
-  WrenchIcon,
-} from "lucide-react";
+import { CheckIcon, ChevronDownIcon, LockIcon, MinusIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { canOpenLinksInApp } from "../../browser/browserLinkTarget";
 import { openUrlInPreview } from "../../browser/openFileInPreview";
 import { readLocalApi } from "../../localApi";
 import { previewEnvironment } from "../../state/preview";
+import { useEnvironments } from "../../state/environments";
+import {
+  excludedModMachinesAtom,
+  modMachineFailuresAtom,
+  modMachineStepsAtom,
+  modStatusesAtom,
+  rollOutMod,
+  setModMachineIncluded,
+} from "../../state/mods";
+import { localEnvironmentIdAtom } from "../../state/primaryEnvironment";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { ModApplyDialog, type ModMachine, takesMod } from "./ModApplyDialog";
 import { WorkLogRow } from "./WorkLog";
+
+/** The machines a mod can go to: the one it was built on, then every other one this app knows. */
+function useModMachines(homeEnvironmentId: EnvironmentId): ReadonlyArray<ModMachine> {
+  const { environments } = useEnvironments();
+  const statuses = useAtomValue(modStatusesAtom);
+  const excluded = useAtomValue(excludedModMachinesAtom);
+  const steps = useAtomValue(modMachineStepsAtom);
+  const failures = useAtomValue(modMachineFailuresAtom);
+  const localEnvironmentId = useAtomValue(localEnvironmentIdAtom);
+  const homeVersion = statuses.get(homeEnvironmentId)?.serverVersion;
+  return environments
+    .filter(
+      (environment) =>
+        environment.environmentId === homeEnvironmentId ||
+        environment.serverConfig?.environment.capabilities.modBuildTransfer === true,
+    )
+    .map((environment) => {
+      const status = statuses.get(environment.environmentId) ?? null;
+      const home = environment.environmentId === homeEnvironmentId;
+      return {
+        environmentId: environment.environmentId,
+        label: environment.label,
+        home,
+        servesThisPage: environment.environmentId === localEnvironmentId,
+        connected: status !== null,
+        included: home || !excluded.includes(environment.environmentId),
+        otherVersion:
+          status !== null && homeVersion !== undefined && status.serverVersion !== homeVersion
+            ? status.serverVersion
+            : null,
+        continuesThreads:
+          environment.serverConfig?.settings.continueThreadsAfterServerUpdate === true,
+        status,
+        step: steps.get(environment.environmentId) ?? null,
+        failure: failures.get(environment.environmentId) ?? null,
+      };
+    })
+    .toSorted((left, right) => Number(right.home) - Number(left.home));
+}
 
 export function ModApprovalCard(props: {
   readonly environmentId: EnvironmentId;
@@ -48,6 +89,9 @@ export function ModApprovalCard(props: {
   const m = useMessages();
   const { item } = props;
   const display = modApprovalDisplay(item, props.visibility, m);
+  const machines = useModMachines(props.environmentId);
+  const home = machines.find((machine) => machine.home);
+
   if (display.kind !== "pending") {
     const Icon =
       display.kind === "pending-elsewhere"
@@ -55,6 +99,11 @@ export function ModApprovalCard(props: {
         : display.outcome === "applied"
           ? CheckIcon
           : MinusIcon;
+    // Only the build that is applied now has anything left to do on a machine.
+    const current =
+      display.kind === "answered" &&
+      display.outcome === "applied" &&
+      home?.status?.build?.buildId === item.preview.buildId;
     return (
       <Collapsible data-v2-item-type={item.type}>
         <CollapsibleTrigger
@@ -75,6 +124,14 @@ export function ModApprovalCard(props: {
             <ModPreviewDetails preview={item.preview} />
           </div>
         </CollapsiblePanel>
+        {current ? (
+          <ModMachineRows
+            homeEnvironmentId={props.environmentId}
+            buildId={item.preview.buildId}
+            restarts={item.preview.restartRequired !== false}
+            machines={machines}
+          />
+        ) : null}
       </Collapsible>
     );
   }
@@ -83,7 +140,91 @@ export function ModApprovalCard(props: {
       environmentId={props.environmentId}
       threadRef={props.threadRef}
       item={item}
+      machines={machines}
     />
+  );
+}
+
+/** Where the applied build stands on each machine, with the one button that finishes it there. */
+function ModMachineRows(props: {
+  readonly homeEnvironmentId: EnvironmentId;
+  readonly buildId: string;
+  readonly restarts: boolean;
+  readonly machines: ReadonlyArray<ModMachine>;
+}) {
+  const gt = useGT();
+  const rows = props.machines.map((machine) => {
+    const applied = machine.status?.build?.buildId === props.buildId;
+    return {
+      machine,
+      applied,
+      needsRestart: applied && machine.status?.restartPending === true,
+      canRestart: machine.status?.canRestart === true,
+    };
+  });
+  // One machine that simply runs the mod has nothing to tell.
+  if (rows.every((row) => row.machine.home && row.applied && !row.needsRestart)) return null;
+
+  return (
+    <ul className="flex flex-col gap-1 pt-1 pl-5 text-xs">
+      {rows.map(({ machine, applied, needsRestart, canRestart }) => {
+        const action =
+          machine.step !== null || !takesMod(machine)
+            ? null
+            : machine.failure !== null
+              ? gt("Retry")
+              : needsRestart
+                ? canRestart
+                  ? gt("Restart")
+                  : null
+                : applied
+                  ? null
+                  : props.restarts
+                    ? gt("Apply and restart")
+                    : gt("Apply");
+        return (
+          <li key={machine.environmentId} className="flex min-w-0 flex-wrap items-center gap-x-2">
+            <span className="font-medium text-foreground">{machine.label}</span>
+            <span className={machine.failure ? "text-destructive" : "text-muted-foreground"}>
+              {machine.step === "copying"
+                ? gt("Copying…")
+                : machine.step === "waiting"
+                  ? gt("Waiting to restart…")
+                  : machine.step === "restarting"
+                    ? gt("Restarting…")
+                    : (machine.failure ??
+                      (!machine.connected
+                        ? gt("Offline")
+                        : machine.otherVersion !== null
+                          ? gt("Runs {version}, update it first", {
+                              version: machine.otherVersion,
+                            })
+                          : needsRestart
+                            ? canRestart
+                              ? gt("Not restarted yet")
+                              : gt("Restart T3 Code on that machine to switch to it.")
+                            : applied
+                              ? gt("Running")
+                              : gt("Not applied")))}
+            </span>
+            {action !== null ? (
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() =>
+                  void rollOutMod({
+                    source: props.homeEnvironmentId,
+                    targets: [machine.environmentId],
+                  })
+                }
+              >
+                {action}
+              </Button>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -91,6 +232,7 @@ function PendingModApprovalCard(props: {
   readonly environmentId: EnvironmentId;
   readonly threadRef: ScopedThreadRef | null;
   readonly item: ModApprovalRequestItem;
+  readonly machines: ReadonlyArray<ModMachine>;
 }) {
   const gt = useGT();
   const m = useMessages();
@@ -104,10 +246,12 @@ function PendingModApprovalCard(props: {
   );
   const [submitting, setSubmitting] = useState<"preview" | "apply" | "decline" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const [previewOpened, setPreviewOpened] = useState(false);
   // Two clicks can land before a render.
   const inFlight = useRef(false);
+  const restarts = item.preview.restartRequired !== false;
 
   // The preview listens on the environment's loopback, which only its own browser panel reaches
   // from a remote client. The link signs in once, so it is opened right away and never shown.
@@ -145,19 +289,30 @@ function PendingModApprovalCard(props: {
     }
     inFlight.current = false;
     setSubmitting(null);
-    if (result._tag === "Success") return;
-    if (!isAtomCommandInterrupted(result)) {
-      pipe(
-        squashAtomCommandFailure(result),
-        (failure) => modApprovalFailureMessage(failure, m),
-        setError,
-      );
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        pipe(
+          squashAtomCommandFailure(result),
+          (failure) => modApprovalFailureMessage(failure, m),
+          setError,
+        );
+      }
+      return;
     }
+    if (result.value.activation === undefined) return;
+    // The card is the applied one from here on; its rows show how each machine gets on.
+    void rollOutMod({
+      source: props.environmentId,
+      targets: props.machines
+        .filter((machine) => machine.included && takesMod(machine))
+        .map((machine) => machine.environmentId),
+    });
   };
 
   const disabled = submitting !== null || !canAnswer;
-  const verifiedRedGreen =
-    item.preview.verification.stockFailed && item.preview.verification.candidatePassed;
+  const unproven = !(
+    item.preview.verification.stockFailed && item.preview.verification.candidatePassed
+  );
 
   return (
     <section
@@ -166,48 +321,25 @@ function PendingModApprovalCard(props: {
       className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
     >
       <div className="flex min-w-0 flex-col gap-1">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-            <WrenchIcon className="size-3.5 shrink-0 text-icon-muted" aria-hidden />
-            <span>{item.preview.title}</span>
-          </h3>
-          <div className="flex items-center gap-1.5">
-            <Badge variant="outline">v{item.preview.baseVersion}</Badge>
-            <Badge variant="secondary">{shortArtifactDigest(item.preview.artifactSha256)}</Badge>
-          </div>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          <T>A change to T3 Code itself, built and ready. Nothing changes until you press Apply.</T>
-        </p>
+        <p className="text-sm font-medium text-foreground">{item.preview.title}</p>
+        <p className="whitespace-pre-wrap text-sm text-muted-foreground">{item.preview.intent}</p>
       </div>
 
-      <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="whitespace-pre-wrap text-xs text-foreground">{item.preview.intent}</p>
-      </div>
-
-      <div className="flex items-start gap-2 text-xs">
-        {verifiedRedGreen ? (
-          <ShieldCheckIcon className="mt-0.5 size-3.5 shrink-0 text-success" aria-hidden />
-        ) : (
-          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
-        )}
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="font-medium text-foreground">{item.preview.verification.summary}</span>
-          <span className="text-muted-foreground">
-            <T>The check is saved with the mod, to re-test it after T3 Code updates.</T>
-          </span>
-        </div>
-      </div>
-
-      {item.preview.warnings.length > 0 ? (
-        <ul className="flex flex-col gap-1 rounded-lg border border-warning/40 bg-warning/10 p-2.5 text-xs text-foreground">
+      {restarts || unproven || item.preview.warnings.length > 0 ? (
+        <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+          {restarts ? (
+            <p>
+              <T>Applying it restarts T3 Code, which interrupts running threads.</T>
+            </p>
+          ) : null}
+          {unproven ? <p className="text-warning">{item.preview.verification.summary}</p> : null}
           {item.preview.warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
+            <p key={warning} className="text-warning">
+              {warning}
+            </p>
           ))}
-        </ul>
+        </div>
       ) : null}
-
-      <ModPreviewDetails preview={item.preview} />
 
       {previewOpened ? (
         <p className="text-xs text-muted-foreground">
@@ -230,22 +362,40 @@ function PendingModApprovalCard(props: {
         </p>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button variant="ghost" size="sm" disabled={disabled} onClick={() => void send("decline")}>
+      <div className="flex min-w-0 items-center justify-end gap-2">
+        <Button
+          size="xs"
+          variant="ghost-muted"
+          disabled={disabled}
+          onClick={() => void send("decline")}
+        >
           {submitting === "decline" ? gt("Declining...") : gt("Decline")}
         </Button>
         <Button
+          size="xs"
           variant="outline"
-          size="sm"
           disabled={disabled}
           onClick={() => void send("preview")}
         >
           {submitting === "preview" ? gt("Starting preview...") : gt("Preview")}
         </Button>
-        <Button variant="default" size="sm" disabled={disabled} onClick={() => void send("apply")}>
+        <Button size="xs" disabled={disabled} onClick={() => setConfirming(true)}>
           {submitting === "apply" ? gt("Applying...") : gt("Apply")}
         </Button>
       </div>
+
+      <ModApplyDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={item.preview.title}
+        restarts={restarts}
+        machines={props.machines}
+        onInclude={setModMachineIncluded}
+        onConfirm={() => {
+          setConfirming(false);
+          void send("apply");
+        }}
+      />
     </section>
   );
 }

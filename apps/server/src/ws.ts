@@ -139,6 +139,7 @@ import * as WorkflowRuntime from "./workflows/WorkflowRuntime.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as FeedbackStore from "./feedback/FeedbackStore.ts";
 import * as ModApprovalRequests from "./mods/ModApprovalRequests.ts";
+import * as ModBuildTransfer from "./mods/ModBuildTransfer.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
   bufferShellLiveStream,
@@ -1513,6 +1514,7 @@ export const layerWsRpc = (
       const secretRequests = yield* SecretRequests.SecretRequests;
       const feedbackStore = yield* FeedbackStore.FeedbackStore;
       const modApprovalRequests = yield* ModApprovalRequests.ModApprovalRequests;
+      const modBuildTransfer = yield* ModBuildTransfer.ModBuildTransfer;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const issues = yield* IssueService.IssueService;
@@ -2441,6 +2443,10 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.agentFeedbackAnswerRequest]: (input) => feedbackStore.answer(input),
         [WS_METHODS.modApprovalAnswerRequest]: (input) => modApprovalRequests.answer(input),
+        [WS_METHODS.modsStatus]: () => modBuildTransfer.status,
+        [WS_METHODS.modsOfferBuild]: (input) => modBuildTransfer.offerBuild(input),
+        [WS_METHODS.modsPackBuild]: (input) => modBuildTransfer.packBuild(input),
+        [WS_METHODS.modsRestart]: () => modBuildTransfer.restart,
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.listWebhookDeliveries(input)),

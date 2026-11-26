@@ -1,6 +1,5 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { RUNTIME_OVERRIDE_ENV_ACTIVE } from "@t3tools/shared/runtimeOverride";
+import { claimedRuntimeOverride } from "@t3tools/shared/runtimeOverride";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 
@@ -24,7 +23,6 @@ export const layer = McpToolAccess.toLayer(ModsToolkit, {
   t3_mod_status: McpToolAccess.reads(() =>
     Effect.gen(function* () {
       const modService = yield* ModService.ModService;
-      const hostEnv = yield* HostProcess.Environment;
       const snapshot = yield* modService.status().pipe(
         Effect.mapError(
           (error) =>
@@ -34,11 +32,15 @@ export const layer = McpToolAccess.toLayer(ModsToolkit, {
             }),
         ),
       );
-      const runningModIds = new Set(
-        hostEnv[RUNTIME_OVERRIDE_ENV_ACTIVE] === "1"
-          ? snapshot.activeOverride?.mods.map((mod) => mod.id)
-          : [],
-      );
+      const active = snapshot.activeOverride;
+      const running = claimedRuntimeOverride();
+      // A client-only build is served by the stock server as soon as it is applied.
+      const activeIsRunning =
+        active !== null &&
+        (active.entryPath === undefined
+          ? running === null
+          : running?.entryPath === active.entryPath);
+      const runningModIds = new Set(activeIsRunning ? active.mods.map((mod) => mod.id) : []);
       return {
         currentVersion: snapshot.currentVersion,
         activeBuildId: snapshot.activeOverride?.buildId ?? null,
@@ -110,9 +112,7 @@ export const layer = McpToolAccess.toLayer(ModsToolkit, {
         });
       }
 
-      const preview = yield* modService
-        .prepareCandidate(input)
-        .pipe(Effect.mapError(toMcpFailure));
+      const preview = yield* modService.prepareCandidate(input).pipe(Effect.mapError(toMcpFailure));
 
       const requestId = yield* random.uuidV7();
       const { turnItemId } = yield* approvalRequests
@@ -141,6 +141,7 @@ export const layer = McpToolAccess.toLayer(ModsToolkit, {
         buildId: preview.buildId,
         artifactSha256: preview.artifactSha256,
         stockFailed: preview.verification.stockFailed,
+        restartRequired: preview.restartRequired ?? true,
         warnings: [...preview.warnings],
       };
     }),
@@ -148,7 +149,7 @@ export const layer = McpToolAccess.toLayer(ModsToolkit, {
   t3_mod_rollback: McpToolAccess.writesEnvironment(() =>
     Effect.gen(function* () {
       const modService = yield* ModService.ModService;
-      yield* modService.disableAll().pipe(
+      const { restartRequired } = yield* modService.disableAll().pipe(
         Effect.mapError(
           (error) =>
             new OrchestratorMcpFailure({
@@ -157,7 +158,7 @@ export const layer = McpToolAccess.toLayer(ModsToolkit, {
             }),
         ),
       );
-      return { disabled: true, restartRequired: true };
+      return { disabled: true, restartRequired };
     }),
   ),
   t3_mod_upgrade_check: McpToolAccess.reads(() =>

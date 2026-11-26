@@ -73,6 +73,10 @@ const ModStartTool = Tool.make("t3_mod_start", {
       description:
         "conflicted: the saved change no longer applies cleanly; resolve the conflict markers.",
     }),
+    builtOn: Schema.Array(Schema.Struct({ id: Schema.String, title: Schema.String })).annotate({
+      description:
+        "The user's other mods, already in this checkout. If one already makes the change asked for, do not make a second mod: start that id and propose it again.",
+    }),
   }),
 })
   .annotate(Tool.Destructive, false)
@@ -81,7 +85,7 @@ const ModStartTool = Tool.make("t3_mod_start", {
 const ModProposeTool = Tool.make("t3_mod_propose", {
   ...shared,
   description:
-    "Build a mod's workspace into a candidate T3 Code and show the user a card with Preview, Apply and Decline. Runs the check without the change (should fail) and with it (must pass). Takes minutes. Then end your turn: the user decides on the card. On failure, fix the workspace and call again.",
+    "Build a mod's workspace into a candidate T3 Code and show the user a card with Preview, Apply and Decline. It runs the check without the change (should fail) and with it (must pass) while it builds, so do not run the check yourself first. About a minute. Then end your turn: the user decides on the card. On failure, fix the workspace and call again.",
   parameters: Schema.Struct({
     id: Schema.String.annotate({ description: "The id given to t3_mod_start." }),
     title: Schema.String.annotate({ description: "Short human-readable title." }),
@@ -105,6 +109,7 @@ const ModProposeTool = Tool.make("t3_mod_propose", {
     buildId: Schema.String,
     artifactSha256: Schema.String,
     stockFailed: Schema.Boolean,
+    restartRequired: Schema.Boolean,
     warnings: Schema.Array(Schema.String),
   }),
 })
@@ -114,7 +119,7 @@ const ModProposeTool = Tool.make("t3_mod_propose", {
 const ModRollbackTool = Tool.make("t3_mod_rollback", {
   ...shared,
   description:
-    "Turn off every mod so the next restart runs stock T3 Code. They stay saved; t3_mod_start then t3_mod_propose turns one back on.",
+    "Turn off every mod and go back to stock T3 Code. They stay saved; t3_mod_start then t3_mod_propose turns one back on.",
   success: Schema.Struct({
     disabled: Schema.Boolean,
     restartRequired: Schema.Boolean,

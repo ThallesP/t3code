@@ -74,6 +74,36 @@ const make = Effect.gen(function* () {
     "ModApprovalRequests.showCard",
   )(function* (card) {
     const turnItemId = TurnItemId.make(`${CARD_PREFIX}${card.requestId}`);
+    // Proposing a mod again deletes the build of its earlier proposal, so that card can no
+    // longer be applied and must not stay open next to this one.
+    const earlier = yield* threads
+      .getThreadRecords(card.threadId, ["turnItems"], {
+        turnItemTypes: ["mod_approval_request"],
+        messageRoles: [],
+      })
+      .pipe(
+        Effect.mapError((cause) => new ModApprovalRequestError({ reason: "load_failed", cause })),
+      );
+    for (const item of earlier.turnItems) {
+      if (
+        item.type !== "mod_approval_request" ||
+        item.modApprovalStatus !== "pending" ||
+        item.preview.modId !== card.preview.modId ||
+        item.runId === null ||
+        item.nodeId === null
+      ) {
+        continue;
+      }
+      yield* record({
+        threadId: item.threadId,
+        runId: item.runId,
+        nodeId: item.nodeId,
+        turnItemId: item.id,
+        preview: item.preview,
+        modApprovalStatus: "cancelled",
+        suffix: "replace",
+      });
+    }
     yield* record({
       threadId: card.threadId,
       runId: card.runId,
@@ -172,9 +202,12 @@ const make = Effect.gen(function* () {
             suffix: "apply",
           });
 
+          // A restart interrupts this machine's threads, so it waits for the user to ask for it.
           return {
             status: "applied" as const,
-            restartRequired: activated.restartRequired,
+            activation: activated.restartRequired
+              ? ("restart_required" as const)
+              : ("live" as const),
           };
         }),
       );
