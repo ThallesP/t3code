@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import type { DatabaseMigrationProgress } from "@t3tools/contracts";
 
 import type { BackendStartupFailure } from "../backend/DesktopBackendManager.ts";
 
@@ -27,6 +28,7 @@ export class DesktopState extends Context.Service<
     readonly canInstallUpdates: Ref.Ref<boolean>;
     readonly primaryBackendStartup: SubscriptionRef.SubscriptionRef<PrimaryBackendStartup>;
     readonly activeRuntimeOverride: Ref.Ref<Option.Option<ActiveDesktopRuntimeOverride>>;
+    readonly databaseMigrationProgress: Ref.Ref<DatabaseMigrationProgress | null>;
   }
 >()("@t3tools/desktop/app/DesktopState") {}
 
@@ -36,6 +38,7 @@ const make = Effect.all({
   canInstallUpdates: Ref.make(false),
   primaryBackendStartup: SubscriptionRef.make<PrimaryBackendStartup>({ _tag: "Starting" }),
   activeRuntimeOverride: Ref.make<Option.Option<ActiveDesktopRuntimeOverride>>(Option.none()),
+  databaseMigrationProgress: Ref.make<DatabaseMigrationProgress | null>(null),
 });
 
 export const layer = Layer.effect(DesktopState, make);

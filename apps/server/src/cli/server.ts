@@ -16,7 +16,8 @@ import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } fr
 
 const encodeCommand = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
 
-const runServerCommand = Effect.fn("server.runServerCommand")(function* (
+// Untraced: a span that lasts the whole process would parent everything the server does.
+const runServerCommand = Effect.fnUntraced(function* (
   flags: CliServerFlags,
   options?: {
     readonly startupPresentation?: ServerConfig.StartupPresentation;
@@ -44,7 +45,7 @@ const runServerCommand = Effect.fn("server.runServerCommand")(function* (
   return yield* stopOnLauncherLoss(run);
 });
 
-export const runDefaultServerCommand = Effect.fn("server.runDefaultServerCommand")(function* (
+export const runDefaultServerCommand = Effect.fnUntraced(function* (
   flags: CliServerFlags & { readonly stock: Option.Option<boolean> },
 ) {
   if (Option.isSome(flags.cwd)) {
@@ -79,7 +80,7 @@ const { autoBootstrapProjectFromCwd: _, ...serveCommandFlags } = sharedServerCom
 export const serveCommand = Command.make("serve", serveCommandFlags).pipe(
   Command.withShortDescription("Run T3 Code in this terminal, with no browser."),
   Command.withDescription(
-    "Run T3 Code in this terminal without opening a browser, and print pairing details. The background service runs this. To set up access from your other devices, run `t3 up`.",
+    "Run T3 Code in this terminal without opening a browser, and print pairing details. The background service runs this too, without printing them: pair with `t3 pair`. To set up access from your other devices, run `t3 up`.",
   ),
   Command.withHandler((flags) =>
     runServerCommand(
