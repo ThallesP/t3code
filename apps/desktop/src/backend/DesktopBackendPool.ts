@@ -10,7 +10,6 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Ref from "effect/Ref";
 import * as Exit from "effect/Exit";
 import * as FiberHandle from "effect/FiberHandle";
 import * as Layer from "effect/Layer";
