@@ -19,6 +19,10 @@ import {
 export { shouldBundleCliDependency };
 
 const repoEnv = loadRepoEnv();
+const ciRepository = process.env.GITHUB_REPOSITORY?.trim();
+const ciSourceRepository = ciRepository
+  ? `${process.env.GITHUB_SERVER_URL?.trim() || "https://github.com"}/${ciRepository}`
+  : "";
 const serverManifestPath = NodePath.join(import.meta.dirname, "package.json");
 // The desktop packager passes APP_VERSION; it can equal the manifest at a commit tagged otherwise.
 const buildVersion =
@@ -160,8 +164,9 @@ export default mergeConfig(
         __T3CODE_TELEMETRY_CHANNEL__: JSON.stringify(telemetryChannel),
         __T3CODE_BUILD_RELAY_URL__: JSON.stringify(repoEnv.T3CODE_RELAY_URL?.trim() ?? ""),
         // Where `v<version>` of this build's source can be cloned from, when not the upstream repo.
+        // A CI build names the repository that ran it, so a fork's release needs no setting.
         __T3CODE_BUILD_SOURCE_REPOSITORY__: JSON.stringify(
-          repoEnv.T3CODE_SOURCE_REPOSITORY?.trim() ?? "",
+          repoEnv.T3CODE_SOURCE_REPOSITORY?.trim() || ciSourceRepository,
         ),
         __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
           repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",

@@ -645,7 +645,8 @@ const make = Effect.gen(function* () {
         Effect.map((result) => result.ok),
       );
     if (!(yield* hasTag())) {
-      yield* git(paths.sourceDir, ["fetch", "--quiet", "origin", `${tag}:${tag}`], {
+      // The managed source may be a checkout whose `origin` is another repository.
+      yield* git(paths.sourceDir, ["fetch", "--quiet", repositoryUrl, `${tag}:${tag}`], {
         timeout: Duration.minutes(15),
       });
     }
