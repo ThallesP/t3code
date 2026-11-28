@@ -124,7 +124,6 @@ export default mergeConfig(
               // Its own file, so an installed T3 Code can load a custom build's CLI by path.
               "src/binMain.ts",
               "src/claude-history-worker.ts",
-              "src/process-launcher.ts",
             ],
       outDir: packBootstrap ? "dist-exe" : packExecutable ? cliAssetDir : "dist",
       sourcemap: !packExecutable,
