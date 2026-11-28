@@ -12,7 +12,12 @@ import { stopOnLauncherLoss } from "../launcherWatch.ts";
 import * as DatabaseMaintenance from "../persistence/DatabaseMaintenance.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as AutomaticPort from "./automaticPort.ts";
-import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
+import {
+  type CliServerFlags,
+  normalizeServerCwdArgument,
+  resolveServerConfig,
+  sharedServerCommandFlags,
+} from "./config.ts";
 
 const encodeCommand = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
 
@@ -49,7 +54,7 @@ export const runDefaultServerCommand = Effect.fnUntraced(function* (
   flags: CliServerFlags & { readonly stock: Option.Option<boolean> },
 ) {
   if (Option.isSome(flags.cwd)) {
-    const cwd = flags.cwd.value.trim();
+    const cwd = yield* normalizeServerCwdArgument(flags.cwd.value);
     const fs = yield* FileSystem.FileSystem;
     const platform = yield* HostProcess.Platform;
     const explicitPath =
